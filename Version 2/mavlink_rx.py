@@ -18,9 +18,6 @@ class MAVLinkRX:
         self.track_chunks = {}
         self.expected_num_track_chunks = {}
 
-        # Throttle the position printout so it doesn't flood the terminal
-        self._last_pos_print = 0.0
-
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data):
         rx = cls(mavlink_connection, data)
@@ -144,12 +141,13 @@ class MAVLinkRX:
         vel_z = msg.vz
         time_boot_ms = msg.time_boot_ms
 
-        # Only print about twice per second so important messages stay visible
-        now = time.time()
-        if now - self._last_pos_print >= 0.5:
-            self._last_pos_print = now
-            print("POS  x=%.2f y=%.2f z=%.2f | VEL vx=%.2f vy=%.2f vz=%.2f" % (
-                pos_x, pos_y, pos_z, vel_x, vel_y, vel_z), flush=True)
+        # share the latest local position so the controller can lock onto it
+        # (position hold) during the countdown.
+        self.data['local_position'] = {
+            'x': pos_x,
+            'y': pos_y,
+            'z': pos_z,
+        }
 
     def on_odometry(self, msg):
         pos_x, pos_y, pos_z = msg.x, msg.y, msg.z
@@ -160,6 +158,17 @@ class MAVLinkRX:
         yaw_speed = msg.yawspeed
         time_boot_us = msg.time_usec
         reset_count = msg.reset_counter
+
+        # also publish position from ODOMETRY as a fallback, in case the sim
+        # streams ODOMETRY instead of LOCAL_POSITION_NED. without this the
+        # controller never gets a position fix and falls back to holding the
+        # origin, which makes the drone drift during the countdown.
+        if not self.data.get('local_position'):
+            self.data['local_position'] = {
+                'x': pos_x,
+                'y': pos_y,
+                'z': pos_z,
+            }
 
     def on_highres_imu(self, msg):
         acceleration_x, acceleration_y, acceleration_z = msg.xacc, msg.yacc, msg.zacc
@@ -187,10 +196,14 @@ class MAVLinkRX:
         data_type, sim_boot_time_ms, race_start_boot_time_ms, race_finish_time_ns, active_gate_index, last_gate_race_time = struct.unpack_from(
             "<BQqqIq", raw_payload)
 
-        # race hasn't started while start time is negative (or None); >= 0 means it started
-        self.data['race_started'] = race_start_boot_time_ms is not None and race_start_boot_time_ms >= 0
-        # race is ongoing while finish time is negative (or None); >= 0 means it ended
-        self.data['race_finished'] = race_finish_time_ns is not None and race_finish_time_ns >= 0
+        # share with the controller so the countdown can sync to the sim's clock
+        self.data['race_status'] = {
+            'sim_boot_time_ms': sim_boot_time_ms,
+            'race_start_boot_time_ms': race_start_boot_time_ms,
+            'race_finish_time_ns': race_finish_time_ns,
+            'active_gate_index': active_gate_index,
+            'last_gate_race_time': last_gate_race_time,
+        }
 
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)
