@@ -10,3 +10,7 @@ Gate dimension:
 - Height:   2700mm
 - Depth:    260mm
 
+Gate inner square boundaries:
+- Width:    1500mm
+- Height:   1500mm
+- Depth:    260mm

@@ -10,10 +10,10 @@ MAVLINK_CMD_SIM_RESET = 31000
 # MOTOR CONTROLS
 # --------------------------------------------------------------------------------------
 
-MOTOR_FRONT_LEFT = 0
+MOTOR_FRONT_LEFT = 1
 MOTOR_FRONT_RIGHT = 1
-MOTOR_BACK_LEFT = 0
-MOTOR_BACK_RIGHT = 0
+MOTOR_BACK_LEFT = 1
+MOTOR_BACK_RIGHT = 1
 
 def update_motor_control(mavlink_conn, system_boot_ms):
     motor_rpms = [MOTOR_FRONT_LEFT, MOTOR_FRONT_RIGHT, MOTOR_BACK_LEFT, MOTOR_BACK_RIGHT, 0, 0, 0, 0]
@@ -28,7 +28,7 @@ def update_motor_control(mavlink_conn, system_boot_ms):
 # --------------------------------------------------------------------------------------
 # ATTITUDE CONTROLS
 # --------------------------------------------------------------------------------------
-PITCH_RATE = -0.3   # rad/s (negative = pitch forward)
+PITCH_RATE = 0.0    # rad/s (negative = pitch forward)
 ROLL_RATE  = 0.0
 YAW_RATE   = 0.0
 THRUST     = 0.6    # 0.0 - 1.0
