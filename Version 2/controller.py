@@ -66,6 +66,29 @@ def update_attitude_flight_control(mavlink_conn, system_boot_ms):
         THRUST
     )
 
+def update_throttle_down(mavlink_conn, system_boot_ms):
+    # Hold the drone on the start pad with the throttle fully down before "GO!".
+    #
+    # The simulator gates the race countdown behind a throttle-down check (it
+    # refuses to start while the throttle is up). Streaming a zero-VELOCITY
+    # position setpoint doesn't satisfy this: the autopilot still applies hover
+    # throttle to hold altitude, so the sim sees the throttle up. Commanding a
+    # zero-THRUST attitude target instead keeps the collective thrust at minimum
+    # (throttle down) while still streaming setpoints so offboard control stays
+    # ready for the moment we release into flight.
+    now_ms = int(time.time() * 1000)
+    mavlink_conn.mav.set_attitude_target_send(
+        now_ms - system_boot_ms,
+        mavlink_conn.target_system,
+        mavlink_conn.target_component,
+        RATES_ATTITUDE_MASK,
+        [1, 0, 0, 0],  # dummy quaternion (ignored)
+        0.0,           # roll rate
+        0.0,           # pitch rate
+        0.0,           # yaw rate
+        0.0            # thrust = throttle fully down
+    )
+
 # --------------------------------------------------------------------------------------
 # POSITION CONTROLS
 # --------------------------------------------------------------------------------------
@@ -126,42 +149,32 @@ def update_position_flight_control(mavlink_conn, system_boot_ms, vz=0.5, vx=0.0,
 
 CONTROL_HZ = 250
 
-# m/s commanded once the countdown reaches "GO!". Applied on the z axis only so
-# the drone moves vertically while x and y stay stable (centered "in the
-# middle"). NED z is positive-down, so NEGATIVE climbs UP and positive descends.
-VERTICAL_VELOCITY = -0.2
-
-# Keep holding the drone perfectly still for this many ms *after* "GO!" is
-# announced before we let it start moving on z. The countdown reaches "GO!"
-# exactly at the simulator's scheduled race start; this is the extra pause the
-# drone waits (while still station-keeping) before climbing. Increase this to
-# delay the start of movement further; decrease toward 0 to start sooner.
-START_DELAY_MS = 5000
+# m/s commanded once the countdown reaches "GO!". Positive y in local NED moves
+# the drone slowly to the right.
+RIGHT_VELOCITY = 0.2
 
 # If the simulator's boot clock jumps backwards by more than this, we assume the
 # sim was reset/restarted and we should re-run the countdown.
 RESET_DETECT_BACKWARD_MS = 2000
-
-# Station-keeping gains used during the countdown to actively hold the drone on
-# its locked spot. A static zero-velocity setpoint isn't enough - the drone
-# drifts/sinks - so each tick we command a velocity that drives it back toward
-# the locked position (a simple proportional controller on position error).
-STATION_KEEP_KP = 1.5          # m/s of correction per metre of error
-STATION_KEEP_MAX_SPEED = 1.0   # clamp the correction so it stays gentle
 
 class Controller:
     def __init__(self, sim_conn, data, system_boot_ms):
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
-        # z-axis (vertical) velocity command used while flying after "GO!".
-        self.vertical_velocity = 0.0
-        # True during the countdown: actively hold position so the drone does
-        # not move at all. False once we're flying.
+        # y-axis velocity command used while flying after "GO!".
+        self.right_velocity = 0.0
+        # True during the countdown: command a flat zero velocity so the drone
+        # stays parked on the start pad and the simulator doesn't flag a false
+        # start. False once we're flying.
         self.holding = True
-        # NED position the drone is locked onto while holding (captured from the
-        # first position fix). None until we get a fix.
-        self.lock_position = None
+        # race_start_boot_time_ms of the race we already flew. Used to ignore the
+        # previous run's race_status that lingers in shared data after a restart
+        # so we don't count down / GO on a stale, already-finished race.
+        self.last_handled_start_ms = None
+        # last observed sim boot clock, shared across the countdown and flight
+        # phases so a backwards jump (sim restart) is detected from anywhere.
+        self.prev_sim_ms = None
 
     def update(self):
         # send automated targets to sim flight controller
@@ -170,50 +183,34 @@ class Controller:
         #update_motor_control(self.sim_conn, self.system_boot_ms)
 
         if self.holding:
-            # active station-keeping: drive the drone back toward its locked
-            # spot so it stays put during the countdown (doesn't drift/sink).
-            vx, vy, vz = self._station_keep_velocity()
-            update_position_flight_control(self.sim_conn, self.system_boot_ms, vz, vx, vy)
+            # Keep the throttle fully down so the drone stays parked on the start
+            # pad and the simulator's pre-race throttle-down check passes (a
+            # zero-velocity hover setpoint doesn't - the autopilot still holds
+            # altitude with hover throttle, which reads as "throttle up").
+            update_throttle_down(self.sim_conn, self.system_boot_ms)
         else:
-            # flying: climb on z, keep x and y stable (vx=vy=0).
-            update_position_flight_control(self.sim_conn, self.system_boot_ms, self.vertical_velocity)
+            # flying: move right slowly, keep x and z stable.
+            update_position_flight_control(self.sim_conn, self.system_boot_ms, 0.0, 0.0, self.right_velocity)
 
         time.sleep(1.0 / CONTROL_HZ)
-
-    # Compute the velocity that pulls the drone back to its locked position.
-    # Falls back to a full stop (zero velocity) until we have a position fix.
-    def _station_keep_velocity(self):
-        pos = self.data.get('local_position')
-        if pos is None:
-            return 0.0, 0.0, 0.0
-        if self.lock_position is None:
-            self.lock_position = dict(pos)
-        vx = self._clamp(STATION_KEEP_KP * (self.lock_position['x'] - pos['x']))
-        vy = self._clamp(STATION_KEEP_KP * (self.lock_position['y'] - pos['y']))
-        vz = self._clamp(STATION_KEEP_KP * (self.lock_position['z'] - pos['z']))
-        return vx, vy, vz
-
-    @staticmethod
-    def _clamp(v):
-        return max(-STATION_KEEP_MAX_SPEED, min(STATION_KEEP_MAX_SPEED, v))
 
     # -------------------------------
     # Hold still (don't move at all)
     #
-    # Actively keeps the drone parked on its locked spot during the countdown.
+    # Keeps the drone parked on the start pad during the countdown by commanding
+    # zero velocity, so it can't trigger the simulator's false-start detection.
     # -------------------------------
     def hover(self):
         self.holding = True
-        self.vertical_velocity = 0.0
+        self.right_velocity = 0.0
 
     # -------------------------------
-    # Fly vertically (move on z, keep x and y stable)
+    # Fly right (move on y, keep x and z stable)
     # -------------------------------
-    def fly_forward(self):
-        # release the hold and reset the lock so the next countdown re-latches.
+    def fly_right(self):
+        # release the hold so the drone starts moving right.
         self.holding = False
-        self.lock_position = None
-        self.vertical_velocity = VERTICAL_VELOCITY
+        self.right_velocity = RIGHT_VELOCITY
 
     # -------------------------------
     # Countdown: "3... 2... 1... GO!" synced to the simulator's race clock
@@ -247,10 +244,26 @@ class Controller:
             start_ms = race['race_start_boot_time_ms']
             now_ms = race['sim_boot_time_ms']
 
+            # sim boot clock jumped backwards -> the simulator was restarted, so
+            # whatever race we flew before is gone. Forget it (even a new race
+            # that happens to reuse the same boot-relative start time is now
+            # valid) and re-arm the countdown from scratch.
+            if self.prev_sim_ms is not None and now_ms < self.prev_sim_ms - RESET_DETECT_BACKWARD_MS:
+                self.last_handled_start_ms = None
+                seen_future_start = False
+                last_count = None
+            self.prev_sim_ms = now_ms
+
             # race not scheduled yet
             if start_ms is None or start_ms < 0:
                 last_count = None
                 seen_future_start = False
+                continue
+
+            # ignore the race we already flew: its race_status keeps arriving
+            # (and lingers in shared data) after the flight, so without this the
+            # countdown would instantly "GO" again on the stale, finished race.
+            if start_ms == self.last_handled_start_ms:
                 continue
 
             remaining_ms = start_ms - now_ms
@@ -266,6 +279,9 @@ class Controller:
 
             # the countdown ends exactly at the scheduled race start ("GO!").
             if remaining_ms <= 0:
+                # remember this race so the flight phase (and the next countdown)
+                # can tell it apart from a genuinely new one.
+                self.last_handled_start_ms = start_ms
                 break
 
             # only announce the final 3, 2, 1 seconds
@@ -276,15 +292,7 @@ class Controller:
 
         print("GO!", flush=True)
 
-        # Stay perfectly still for START_DELAY_MS after "GO!" before moving:
-        # keep station-keeping (holding) so the drone doesn't drift, then
-        # release into vertical flight once the pause has elapsed.
-        hold_until = time.time() + START_DELAY_MS / 1000.0
-        while time.time() < hold_until:
-            self.hover()
-            self.update()
-
-        self.fly_forward()
+        self.fly_right()
 
     # -------------------------------
     # Fly forward until the simulator is reset / a new race is scheduled
@@ -296,7 +304,6 @@ class Controller:
     #   * a fresh race being scheduled in the future while we're flying.
     # -------------------------------
     def fly_until_reset(self):
-        prev_sim_ms = None
         while True:
             self.update()
 
@@ -308,13 +315,19 @@ class Controller:
             now_ms = race['sim_boot_time_ms']
 
             # sim clock went backwards -> the simulator was reset/restarted.
-            if prev_sim_ms is not None and now_ms < prev_sim_ms - RESET_DETECT_BACKWARD_MS:
+            if self.prev_sim_ms is not None and now_ms < self.prev_sim_ms - RESET_DETECT_BACKWARD_MS:
+                self.prev_sim_ms = now_ms
                 return
-            prev_sim_ms = now_ms
+            self.prev_sim_ms = now_ms
 
-            # a new race got scheduled in the future while we were flying ->
-            # the simulator started a new run, so go back to the countdown.
-            if start_ms is not None and start_ms >= 0 and (start_ms - now_ms) > 0:
+            # a genuinely new race (different from the one we just flew) got
+            # scheduled in the future -> the simulator started a new run, so go
+            # back to the countdown. Comparing against last_handled_start_ms
+            # stops the race we're currently flying from being mistaken for a
+            # new one.
+            if (start_ms is not None and start_ms >= 0
+                    and start_ms != self.last_handled_start_ms
+                    and (start_ms - now_ms) > 0):
                 return
 
     # -------------------------------

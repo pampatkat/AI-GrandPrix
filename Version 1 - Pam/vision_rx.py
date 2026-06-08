@@ -13,9 +13,10 @@ class VisionRX:
 
     def __init__(self, data):
         self.data = data
+        self.window_open = False
         self.thread = threading.Thread(
             target=self._vision_loop,
-            daemon=False
+            daemon=True
         )
         self.is_running = True
         self.thread.start()
@@ -83,10 +84,16 @@ class VisionRX:
                 del frames[frame_id]
 
     def process_frame(self, frame_id, img):
-        #
-        #
-        # Success!
-        # image is your FPV camera frame in JPEG format
-        #
-        #
-        pass
+        # Stop displaying once the race has ended (flag set by mavlink_rx.on_race_status)
+        if self.data.get('race_finished'):
+            if self.window_open:
+                cv2.destroyWindow("FPV Camera")
+                cv2.waitKey(1)  # let the GUI process the close event
+                self.window_open = False
+            return
+
+        # img is the decoded FPV camera frame (a BGR pixel array from cv2.imdecode)
+        cv2.imshow("FPV Camera", img)
+        self.window_open = True
+        # waitKey is required for the OpenCV window to actually render/refresh
+        cv2.waitKey(1)

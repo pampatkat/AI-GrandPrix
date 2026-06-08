@@ -23,16 +23,23 @@ ts_loop = components['ts_loop']
 mavlink_rx = components['mavlink_rx']
 vision_rx = components['vision_rx']
 
+print("Resetting simulation...", flush=True)
+controller.send_sim_reset_command()
+time.sleep(1.0)  # give the sim a moment to reset before arming
+
 print("Arming drone...", flush=True)
 controller.arm()
 print("Starting control loop...", flush=True)
 is_running = True
-while is_running:
-    controller.update()
-
-# exit
-ts_loop.get_thread_for_join().join(timeout=1.0)
-mavlink_rx.get_thread_for_join().join(timeout=1.0)
-vision_rx.get_thread_for_join().join(timeout=1.0)
+try:
+    while is_running:
+        controller.update()
+except KeyboardInterrupt:
+    print("\nShutting down...", flush=True)
+finally:
+    # signal the background threads to stop, then wait briefly for them
+    ts_loop.get_thread_for_join().join(timeout=1.0)
+    mavlink_rx.get_thread_for_join().join(timeout=1.0)
+    vision_rx.get_thread_for_join().join(timeout=1.0)
 
 print("Client exited!", flush=True)

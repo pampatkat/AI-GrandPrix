@@ -18,12 +18,15 @@ class MAVLinkRX:
         self.track_chunks = {}
         self.expected_num_track_chunks = {}
 
+        # Throttle the position printout so it doesn't flood the terminal
+        self._last_pos_print = 0.0
+
     @classmethod
     def create_mavlink_rx(cls, mavlink_connection, data):
         rx = cls(mavlink_connection, data)
         rx.thread = threading.Thread(
             target=rx.mavlink_receive_loop,
-            daemon = False
+            daemon = True
         )
         rx.is_running = True
         rx.thread.start()
@@ -141,6 +144,13 @@ class MAVLinkRX:
         vel_z = msg.vz
         time_boot_ms = msg.time_boot_ms
 
+        # Only print about twice per second so important messages stay visible
+        now = time.time()
+        if now - self._last_pos_print >= 0.5:
+            self._last_pos_print = now
+            print("POS  x=%.2f y=%.2f z=%.2f | VEL vx=%.2f vy=%.2f vz=%.2f" % (
+                pos_x, pos_y, pos_z, vel_x, vel_y, vel_z), flush=True)
+
     def on_odometry(self, msg):
         pos_x, pos_y, pos_z = msg.x, msg.y, msg.z
         qx, qy, qz, qw = msg.q[1], msg.q[2], msg.q[3], msg.q[0]
@@ -176,6 +186,11 @@ class MAVLinkRX:
         # last_gate_race_time - race time in seconds when last gate was passed
         data_type, sim_boot_time_ms, race_start_boot_time_ms, race_finish_time_ns, active_gate_index, last_gate_race_time = struct.unpack_from(
             "<BQqqIq", raw_payload)
+
+        # race hasn't started while start time is negative (or None); >= 0 means it started
+        self.data['race_started'] = race_start_boot_time_ms is not None and race_start_boot_time_ms >= 0
+        # race is ongoing while finish time is negative (or None); >= 0 means it ended
+        self.data['race_finished'] = race_finish_time_ns is not None and race_finish_time_ns >= 0
 
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)
