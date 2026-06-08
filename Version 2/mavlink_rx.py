@@ -42,8 +42,15 @@ class MAVLinkRX:
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
             except ConnectionResetError:
-                print('WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port.')
-                return
+                # On Windows, sending UDP to a port with no listener (e.g. the
+                # simulator briefly closes/resets the socket) makes the OS return
+                # an ICMP "port unreachable", which surfaces here as
+                # ConnectionResetError (WSAECONNRESET / WinError 10054). UDP is
+                # connectionless and the socket is still usable, so treat this as
+                # transient: back off briefly and keep listening instead of
+                # killing the receive thread.
+                time.sleep(0.01)
+                continue
 
             if msg is None:
                 time.sleep(0.001)
