@@ -1,6 +1,7 @@
 import time
 
 from pymavlink import mavutil
+import navigation
 
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
@@ -82,7 +83,7 @@ VELOCITY_POSITION_MASK = (
         mavutil.mavlink.POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE
 )
 
-def update_position_flight_control(mavlink_conn, system_boot_ms):
+def update_position_flight_control(mavlink_conn, system_boot_ms, velocity_target):
     now_ms = int(time.time() * 1000)
 
     """
@@ -108,17 +109,21 @@ def update_position_flight_control(mavlink_conn, system_boot_ms):
     yaw_rate                  : yaw rate setpoint [rad/s] (type:float)
     """
     mavlink_conn.mav.set_position_target_local_ned_send(
+        # now_ms, 
         now_ms - system_boot_ms,
         mavlink_conn.target_system,
         mavlink_conn.target_component,
-        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        mavutil.mavlink.MAV_FRAME_BODY_NED,
         VELOCITY_POSITION_MASK,
         0.0, 0, 0.0,    # ignored position NED
-        2.0, 0.0, 0.0,  # Vel - 2 m/s forward
+        # 2.0, 0.0, 0.0,  # Vel - 2 m/s forward
+        velocity_target['vx'], velocity_target['vy'], velocity_target['vz'],
         0.0, 0, 0.0,    # ignored acceleration
         0,              # ignored yaw
         0.0             # ignored yaw rate
     )
+    # print(VELOCITY_POSITION_MASK)
+    # print(velocity_target['vx'], velocity_target['vy'], velocity_target['vz'])
 
 # --------------------------------------------------------------------------------------
 # Control Loop
@@ -137,7 +142,8 @@ class Controller:
         #update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
         # alternatively one of
         # update_position_flight_control(self.sim_conn, self.system_boot_ms)
-        update_motor_control(self.sim_conn, self.system_boot_ms)
+        # update_motor_control(self.sim_conn, self.system_boot_ms)
+        navigation.handle_user_input(self)
 
         time.sleep(1.0 / CONTROL_HZ)
 

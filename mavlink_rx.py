@@ -141,6 +141,8 @@ class MAVLinkRX:
         vel_z = msg.vz
         time_boot_ms = msg.time_boot_ms
 
+        # print(vel_x, vel_y, vel_z)
+
     def on_odometry(self, msg):
         pos_x, pos_y, pos_z = msg.x, msg.y, msg.z
         qx, qy, qz, qw = msg.q[1], msg.q[2], msg.q[3], msg.q[0]
