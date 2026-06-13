@@ -2,7 +2,7 @@
 
 ## Overview & Purpose
 
-`navigation.py` implements FPS-style keyboard and mouse control for drone flight. The module translates user input (WASD for movement, E/C for altitude, mouse for camera rotation) into NED-frame velocity commands sent to the flight controller at 250 Hz. Movement is always relative to camera heading except for altitude (which is world-relative).
+`navigation.py` implements FPS-style keyboard and mouse control for drone flight. The module translates user input (WASD for horizontal movement, E/C for camera-relative altitude changes, mouse for camera rotation) into NED-frame velocity commands sent to the flight controller at 250 Hz. ALL movement (horizontal and vertical) is relative to the camera's local axes (i.e., affected by camera yaw, pitch, and roll). The camera and vehicle body share the same origin; the camera is mounted tilted 20° upward relative to the body (camera pitch = body pitch + 20°). Mouse-driven camera motion and autonomous velocity inputs are planned as future integrations and should be supported by the attitude composition described below.
 
 ---
 
@@ -14,7 +14,7 @@
 |---|---|---|---|
 | **Forward/Backward** | W key (forward) / S key (backward) | Velocity in camera-forward direction at 2.0 m/s | Regardless of drone heading |
 | **Left/Right Strafe** | A key (left) / D key (right) | Velocity perpendicular to camera-forward (±90°) at 2.0 m/s | Perpendicular to forward direction |
-| **Altitude Control** | E key (up) / C key (down) | Vertical velocity at 2.0 m/s (or -2.0 for down) | World-relative, independent of heading |
+| **Altitude Control** | E key (up) / C key (down) | Velocity along camera-local vertical at 2.0 m/s (camera-up/down) | Camera-relative: affected by camera pitch and roll |
 | **Diagonal Movement** | W+A, W+D, S+A, S+D | Vector sum of individual directions at 2.0 m/s per axis | E.g., W+A = forward + left = 45° angle at (2.0, -2.0) NED |
 | **Conflict Resolution** | Conflicting keys (W+S or A+D) | Conflicting axes cancel to 0 | W+S → vx=0; A+D → vy=0; both → hover |
 | **No Input** | No keys pressed | vx=0, vy=0, vz=0 | Drone hovers |
@@ -30,8 +30,8 @@
 | **Speed Magnitude** | 2.0 m/s for all directions (lateral and vertical) |
 | **Response Latency** | <4ms (next control cycle at latest) |
 | **Velocity Application** | Instant change (no acceleration ramping) |
-| **Camera Heading Source** | `armed_controller.data['attitude']['yaw']` (radians) |
-| **Coordinate Transform** | Camera-relative movement (WASD) → NED frame using yaw rotation |
+| **Camera Attitude Source** | `armed_controller.data['attitude']['roll']`, `['pitch']`, `['yaw']` (radians) |
+| **Coordinate Transform** | Camera-relative movement (WASD + E/C) → NED frame using full attitude rotation (roll, pitch, yaw) |
 
 ---
 
@@ -41,30 +41,48 @@
 - **North (vx)**: Positive north, negative south
 - **East (vy)**: Positive east, negative west  
 - **Down (vz)**: Positive down, negative up (note: inverted from typical +Z up convention)
-- **Yaw (ψ)**: Drone heading in radians; 0 = north, π/2 = east, π/-π = south, -π/2 = west
+- **Yaw (ψ)**: Drone heading in radians; 0 = north, +π/2 = east, +π or -π = south, -π/2 = west
 
-### Camera-Relative Frame (User Input WASD)
-- **Forward (W)**: Direction camera is pointing
-- **Left (A)**: 90° counterclockwise from forward
-- **Backward (S)**: 180° from forward
-- **Right (D)**: 90° clockwise from forward
+### Camera-Relative Frame (User Input WASD + E/C)
+- Camera axes (camera/body frame):
+    - `x` (forward): positive in the direction the camera is pointing
+    - `y` (right): positive to the camera's right (pressing `D` yields positive `y`)
+    - `z` (down): positive down relative to the camera (consistent with NED's down sign)
+- **Forward (W)**: positive `x` in camera frame
+- **Left (A)**: negative `y` in camera frame
+- **Backward (S)**: negative `x` in camera frame
+- **Right (D)**: positive `y` in camera frame
+- **Up/Down (E/C)**: up = negative `z` in camera frame (E → negative `z`), down = positive `z` (C → positive `z`)
 
-### Transformation: Camera-Relative → NED
-To convert camera-relative velocities to NED frame, apply 2D rotation by yaw angle:
+### Transformation: Camera-Relative → NED (Full 3D)
+Camera-relative velocities are expressed in the camera/body frame as a 3-vector `v_cam = [vx_cam, vy_cam, vz_cam]` where `vx_cam` is forward, `vy_cam` is right, and `vz_cam` is down (positive down). To convert `v_cam` to NED/inertial coordinates `v_ned`, apply the rotation defined by the camera/world attitude (roll φ, pitch θ, yaw ψ):
 
 ```
-vx_ned = vx_camera * cos(yaw) - vy_camera * sin(yaw)
-vy_ned = vx_camera * sin(yaw) + vy_camera * cos(yaw)
+R = R_z(psi) * R_y(theta) * R_x(phi)
+
+# where
+R_x(phi) = [[1, 0, 0], [0, cos(phi), -sin(phi)], [0, sin(phi), cos(phi)]]
+R_y(theta) = [[cos(theta), 0, sin(theta)], [0, 1, 0], [-sin(theta), 0, cos(theta)]]
+R_z(psi) = [[cos(psi), -sin(psi), 0], [sin(psi), cos(psi), 0], [0, 0, 1]]
+
+v_ned = R * v_cam
 ```
 
-**Example:** If drone is pointed East (yaw = π/2):
-- User presses W (forward): camera_vel = (2, 0) → NED = (0, 2) ✓ moves East
-- User presses D (right): camera_vel = (0, -2) → NED = (-2, 0) ✓ moves North (perpendicular)
+This reduces to the 2D yaw-only rotation when `phi = 0` and `theta = 0` (level camera).
 
-### Altitude (vz)
-- **E key**: vz = -2.0 (negative in NED = upward)
-- **C key**: vz = +2.0 (positive in NED = downward)
-- **No input**: vz = 0
+**Example (level camera, phi=0, theta=0, psi=π/2):**
+- User presses W (forward): `v_cam = [2, 0, 0]` → `v_ned = [0, 2, 0]` (moves East)
+
+**Example (pitched camera):**
+- If camera is pitched down (θ > 0), pressing E (camera-up) will produce an upward component in NED plus forward/back components depending on pitch and roll.
+
+### Altitude (camera-relative `vz`)
+- In camera frame: `vz_cam` is positive down. Key mappings (camera frame):
+    - **E key**: `vz_cam = -2.0` (camera-up)
+    - **C key**: `vz_cam = +2.0` (camera-down)
+    - **No input**: `vz_cam = 0`
+
+After building the full camera-relative velocity vector `[vx_cam, vy_cam, vz_cam]`, transform it to NED using the full attitude rotation `R(roll,pitch,yaw)` described above, and send the resulting `v_ned` to the controller API.
 
 ---
 
@@ -84,7 +102,7 @@ def handle_user_input(armed_controller: Controller) -> None
   - `.sim_conn`: MAVLink connection object (passed to flight control API)
   - `.system_boot_ms`: Boot timestamp in milliseconds (passed to flight control API)
   - `.data`: Shared data dict containing:
-    - `.data['attitude']`: Dict with keys `yaw` (float, radians), possibly `roll`, `pitch`
+        - `.data['attitude']`: Dict representing the vehicle body attitude with keys `roll`, `pitch`, `yaw` (floats, radians). The camera attitude is computed from the body attitude by applying a fixed camera mount offset (camera pitch +20°) and any optional mouse-driven camera deltas.
     - Other state keys (optional for this function)
 
 **Outputs:**
@@ -92,15 +110,19 @@ def handle_user_input(armed_controller: Controller) -> None
 
 **Behavior:**
 1. Poll all relevant keys (W, A, S, D, E, C)
-2. Resolve conflicts (W+S → W cancels, A+D → D cancels)
+2. Resolve conflicts (W+S → both cancel, A+D → both cancel)
 3. Build velocity vector from remaining keys
-4. Retrieve drone yaw from `armed_controller.data['attitude']['yaw']`
-5. Transform camera-relative velocity to NED frame using yaw
+4. Retrieve body attitude from `armed_controller.data['attitude']` (use roll, pitch, yaw)
+     - Compute `camera_attitude` by applying the fixed camera mount offset (pitch +20°) and any optional mouse-driven deltas:
+         `camera_attitude.roll = body_roll + mouse_roll_delta` (if provided)
+         `camera_attitude.pitch = body_pitch + CAMERA_PITCH_OFFSET + mouse_pitch_delta`
+         `camera_attitude.yaw = body_yaw + mouse_yaw_delta`
+5. Transform camera-relative velocity to NED frame using `camera_attitude` full rotation (roll, pitch, yaw)
 6. Call `controller.update_position_flight_control(armed_controller.sim_conn, armed_controller.system_boot_ms, velocity_dict)`
 7. Return (no output)
 
 **Error Handling:**
-- If `armed_controller.data['attitude']['yaw']` is missing: log warning, assume yaw=0
+- If `armed_controller.data['attitude']` is missing or incomplete: log warning, assume roll=0,pitch=0,yaw=0
 - If `armed_controller.sim_conn` is None: silently return (MAVLink unavailable)
 - If `armed_controller.system_boot_ms` is missing: raise ValueError (critical timing info)
 
@@ -195,7 +217,7 @@ def _calculate_velocity_camera_frame(keys: Dict[str, bool]) -> Dict[str, float]
 {
     'vx': float,  # Camera-relative forward/backward [m/s]
     'vy': float,  # Camera-relative left/right [m/s]
-    'vz': float   # Altitude relative [m/s]; NED frame (positive=down)
+    'vz': float   # Altitude in camera frame [m/s]; camera convention: positive=down
 }
 ```
 
@@ -207,23 +229,23 @@ def _calculate_velocity_camera_frame(keys: Dict[str, bool]) -> Dict[str, float]
 **Examples:**
 - W only: `{vx: 2.0, vy: 0.0, vz: 0.0}`
 - W+A (forward-left): `{vx: 2.0, vy: -2.0, vz: 0.0}`
-- E only (ascending): `{vx: 0.0, vy: 0.0, vz: -2.0}` (negative = up in NED)
+- E only (camera-up): `{vx: 0.0, vy: 0.0, vz: -2.0}` (negative = up in camera frame)
 - No keys: `{vx: 0.0, vy: 0.0, vz: 0.0}`
 
 ---
 
-### Helper Function: `_transform_to_ned(velocity_camera: Dict, yaw: float) -> Dict[str, float]`
+### Helper Function: `_transform_to_ned(velocity_camera: Dict, attitude: Dict) -> Dict[str, float]`
 
-**Purpose:** Rotate camera-relative velocity to NED frame using drone heading.
+**Purpose:** Rotate camera-relative 3D velocity to NED frame using full drone/camera attitude.
 
 **Signature:**
 ```python
-def _transform_to_ned(velocity_camera: Dict[str, float], yaw: float) -> Dict[str, float]
+def _transform_to_ned(velocity_camera: Dict[str, float], attitude: Dict[str, float]) -> Dict[str, float]
 ```
 
 **Inputs:**
-- `velocity_camera`: `{'vx': float, 'vy': float, 'vz': float}` in camera frame
-- `yaw`: Drone heading in radians (from MAVLink attitude)
+- `velocity_camera`: `{'vx': float, 'vy': float, 'vz': float}` in camera frame (vx forward, vy right, vz down)
+-- `attitude`: `{'roll': float, 'pitch': float, 'yaw': float}` in radians — this should be the *camera* attitude (body attitude + fixed camera mount offset + optional mouse deltas). Compute camera attitude from `armed_controller.data['attitude']` before calling this helper.
 
 **Output:**
 ```python
@@ -235,21 +257,21 @@ def _transform_to_ned(velocity_camera: Dict[str, float], yaw: float) -> Dict[str
 ```
 
 **Transformation:**
-```python
-vx_ned = velocity_camera['vx'] * cos(yaw) - velocity_camera['vy'] * sin(yaw)
-vy_ned = velocity_camera['vx'] * sin(yaw) + velocity_camera['vy'] * cos(yaw)
-vz_ned = velocity_camera['vz']  # Altitude is NOT rotated
+Use the full rotation matrix constructed from roll (φ), pitch (θ), yaw (ψ):
+
+```
+R = R_z(psi) * R_y(theta) * R_x(phi)
+v_ned = R * v_cam
 ```
 
-**Example:** Drone yaw = 0 (pointing North), user presses W (forward):
-- Input: `velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}`, yaw = 0
-- cos(0) = 1, sin(0) = 0
+Where the elemental rotation matrices are defined as in the main transformation section above. This maps camera-local forward/right/down velocities into NED coordinates.
+
+**Example (level camera, roll=0, pitch=0, yaw=0):**
+- Input: `velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}`, attitude = {0,0,0}
 - Result: `{'vx': 2.0, 'vy': 0.0, 'vz': 0.0}` ✓ moves North
 
-**Example:** Drone yaw = π/2 (pointing East), user presses W (forward):
-- Input: `velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}`, yaw = π/2
-- cos(π/2) = 0, sin(π/2) = 1
-- Result: `{'vx': 0.0, 'vy': 2.0, 'vz': 0.0}` ✓ moves East
+**Example (pitched camera):**
+- With non-zero pitch, an `E` (camera-up) input produces vertical plus horizontal components in NED according to the camera orientation.
 
 ---
 
@@ -260,6 +282,8 @@ vz_ned = velocity_camera['vz']  # Altitude is NOT rotated
 SPEED_LATERAL = 2.0      # m/s for WASD movement
 SPEED_VERTICAL = 2.0     # m/s for E/C movement
 CONTROL_LOOP_HZ = 250    # Hz (called every 4 ms)
+CAMERA_PITCH_OFFSET = 20.0  # degrees; camera is mounted +20° pitch relative to body
+# (Implementation should convert to radians when composing rotations)
 
 # Key names (must match keyboard library)
 KEY_FORWARD = 'w'
@@ -284,12 +308,14 @@ Passed to `controller.update_position_flight_control()`:
 Retrieved from `armed_controller.data['attitude']`:
 ```python
 {
-    'yaw': float,     # Heading in radians; 0=North
-    'roll': float,    # (optional for navigation.py)
-    'pitch': float,   # (optional for navigation.py)
+    'roll': float,    # Body roll in radians
+    'pitch': float,   # Body pitch in radians
+    'yaw': float,     # Body yaw (heading) in radians; 0=North
     # ... possibly more keys
 }
 ```
+
+Note: the values above represent the vehicle *body* attitude. Compute the *camera* attitude by applying the fixed camera mount offset (`CAMERA_PITCH_OFFSET`) and any optional mouse deltas before using the rotation in `_transform_to_ned()`.
 
 ---
 
@@ -310,12 +336,10 @@ handle_user_input(armed_controller)
   │   └─ vy = -2*a + 2*d
   │   └─ vz = 2*c - 2*e
   │
-  ├─ yaw = armed_controller.data['attitude']['yaw'] (handle missing key)
-  │
-  ├─ velocity_ned = _transform_to_ned(velocity_camera, yaw)
-  │   └─ vx_ned = vx*cos(yaw) - vy*sin(yaw)
-  │   └─ vy_ned = vx*sin(yaw) + vy*cos(yaw)
-  │   └─ vz_ned = vz
+    ├─ attitude = armed_controller.data['attitude'] (handle missing keys; use roll,pitch,yaw)
+  
+    ├─ velocity_ned = _transform_to_ned(velocity_camera, attitude)
+    │   └─ v_ned = R(roll,pitch,yaw) * v_cam  # full 3D rotation described above
   │
   └─ controller.update_position_flight_control(
         armed_controller.sim_conn,
@@ -336,7 +360,7 @@ handle_user_input(armed_controller)
 | **Conflicting altitude** | E and C both pressed | Both cancel; vz = 0 | _resolve_conflicts() sets both False |
 | **Multiple conflicts** | W+S+A+D all pressed | All cancel; hover | All resolve to False in _resolve_conflicts() |
 | **Rapid key toggle** | Key pressed/released faster than control cycle | Detected on next frame (within 4ms) | keyboard.is_pressed() polled every cycle |
-| **Missing yaw in attitude** | shared_data['attitude']['yaw'] not present | Assume yaw = 0; log warning | Try/except, default to 0 with warning log |
+| **Missing attitude (roll/pitch/yaw)** | `shared_data['attitude']` missing or incomplete | Assume roll=0,pitch=0,yaw=0; log warning | Try/except, default to neutral attitude with warning log |
 | **Null MAVLink connection** | armed_controller.sim_conn is None | Silently return; no command sent | Guard check before calling controller API |
 | **Missing system_boot_ms** | armed_controller.system_boot_ms is None | Raise ValueError; this is critical | Fail fast; log error and re-raise |
 | **Keyboard library exception** | keyboard.is_pressed() raises exception | Log error; return all False; continue running | Try/except in _get_pressed_keys() |
@@ -381,28 +405,36 @@ Expected: {'vx': 2.0, 'vy': -2.0, 'vz': 0.0}
 **Test 5: NED Transformation (Yaw = 0, pointing North)**
 ```
 Test: _transform_to_ned()
-Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, yaw = 0
+Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, attitude = {'roll':0, 'pitch':0, 'yaw':0}
 Expected: {'vx': 2.0, 'vy': 0.0, 'vz': 0.0} (moves North)
 ```
 
 **Test 6: NED Transformation (Yaw = π/2, pointing East)**
 ```
 Test: _transform_to_ned()
-Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, yaw = π/2
+Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, attitude = {'roll':0, 'pitch':0, 'yaw':π/2}
 Expected: {'vx': ≈0, 'vy': 2.0, 'vz': 0.0} (moves East)
 ```
 
 **Test 7: NED Transformation (Yaw = π/4, 45° heading)**
 ```
 Test: _transform_to_ned()
-Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, yaw = π/4
+Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, attitude = {'roll':0, 'pitch':0, 'yaw':π/4}
 Expected: {'vx': √2, 'vy': √2, 'vz': 0.0} (moves northeast at 45°)
 ```
 
-**Test 8: Altitude Always World-Relative**
+**Test 8: Altitude with Level Camera (independent of yaw)**
 ```
-Test: _transform_to_ned() with various yaws
-E key pressed at yaw=0, π/2, π: should always be {'vx': 0, 'vy': 0, 'vz': -2.0}
+Test: _transform_to_ned() with roll=0, pitch=0 and various yaw values
+Input: E key (vz_cam = -2.0)
+Expected: v_ned == {'vx': 0.0, 'vy': 0.0, 'vz': -2.0} for any yaw
+```
+
+**Test 9: Altitude Affected by Pitch/Roll**
+```
+Test: _transform_to_ned() with non-zero pitch (θ) or roll (φ)
+Input: E key (vz_cam = -2.0), pitch = 30° (θ ≈ 0.524 rad)
+Expected: v_ned has a negative vz component (up) plus non-zero vx/vy components corresponding to the camera orientation
 ```
 
 ### Integration Tests (with Simulator)
@@ -428,11 +460,11 @@ E key pressed at yaw=0, π/2, π: should always be {'vx': 0, 'vy': 0, 'vz': -2.0
    - Action: Press W
    - Verify: Drone moves East (not North)
 
-5. **Altitude Movement**
-   - Action: Press E
-   - Verify: Drone climbs at 2.0 m/s (altitude independent of heading)
-   - Action: Press C
-   - Verify: Drone descends at 2.0 m/s
+5. **Altitude Movement (Camera-Relative)**
+    - Action: Press E
+    - Verify: Drone moves along camera-up direction at 2.0 m/s; with level camera this results in pure climb, with pitched camera this produces climb plus horizontal components
+    - Action: Press C
+    - Verify: Drone moves along camera-down direction at 2.0 m/s
 
 6. **Rapid Key Changes**
    - Action: Rapidly toggle W on/off (press, release, press, release)
@@ -459,20 +491,15 @@ E key pressed at yaw=0, π/2, π: should always be {'vx': 0, 'vy': 0, 'vz': -2.0
 ### Included
 - Keyboard input (WASD, E, C) with conflict resolution
 - Camera-heading-relative horizontal movement (WASD)
-- World-relative vertical movement (E, C)
+- Camera-relative vertical movement (E, C)
 - NED frame transformation
 - 250 Hz control loop integration
 - Instant velocity changes (no ramping)
 - Continuous polling (handles key events at sub-frame granularity)
 
 ### Excluded (Future Enhancements)
-- Mouse control for camera rotation (separate feature)
-- Acceleration/velocity ramping (smoother feel)
-- Proportional control (analog stick support)
-- Gimbal/camera stabilization
-- Automatic return-to-home or waypoint navigation
-- Collision avoidance
-- Speed presets (slow/fast modes)
+- Mouse control for camera rotation — planned; specs reserve hooks for mouse-driven camera deltas applied to the camera attitude (roll/pitch/yaw).
+- Autonomous movement integration (external/autonomy velocity commands) — planned; leave API hooks to merge or prioritize external velocity targets with live user input.
 
 ### Assumptions
 - Drone is already armed (no arming logic in navigation.py)
@@ -480,27 +507,3 @@ E key pressed at yaw=0, π/2, π: should always be {'vx': 0, 'vy': 0, 'vz': -2.0
 - Flight controller can accept NED velocity commands
 - No GPS/vision feedback required for basic movement
 - Keyboard library (used by existing code) is available
-
----
-
-## 9. POINTS ON SPEC-DRIVEN DEVELOPMENT (Educational)
-
-When writing specs like this, include these elements:
-
-1. **Clear Functional Requirements**: What inputs produce what outputs? Be specific (e.g., "2.0 m/s" not "fast").
-
-2. **Non-Functional Requirements**: Frequency, latency, frame choice, speed ranges. Often more important than you think.
-
-3. **Mathematical Foundation**: When transformations are involved (rotations, frame changes), spell out the math. Reduces ambiguity.
-
-4. **Function Signatures**: Exact inputs, outputs, and data types. Implementer shouldn't have to guess.
-
-5. **Edge Cases & Error Handling**: What breaks? How do you handle missing data, conflicts, or unusual states?
-
-6. **Examples & Test Cases**: Walk through concrete scenarios. A good example is worth 1000 words of explanation.
-
-7. **Scope Boundaries**: Explicitly say what's IN and what's OUT. Prevents scope creep.
-
-8. **References to Existing Code**: Link to APIs, constants, and patterns already in the codebase.
-
-9. **Verification/Testing Strategy**: How will you know it works? Specific test cases, not vague statements.
