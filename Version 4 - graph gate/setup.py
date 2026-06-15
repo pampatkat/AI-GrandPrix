@@ -3,8 +3,12 @@ from timesync import TimeSync
 from vision_rx import VisionRX
 from mavlink_rx import MAVLinkRX
 from controller import Controller
+from logs import setup_logging
 
 def setup_components(shared_data, system_boot_ms, server_ip, server_udp_port):
+    # Initialize logging
+    setup_logging()
+
     # -------------------------------
     # Mavlink Connection
     # -------------------------------
