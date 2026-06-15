@@ -2,20 +2,54 @@ import logging
 import sys
 from datetime import datetime
 
+# Instead of print(msg)
+# logging.info(msg)
+
+# Other logging levels
+# logging.debug("Low-level details")
+# logging.warning("Something might be wrong")
+# logging.error("Something failed")
+# logging.critical("Serious failure")
+
+# Idea for exceptions
+# try:
+#     1 / 0
+# except Exception:
+#     logging.exception("An error occurred")
+
 # Setup logging
-timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-logging.basicConfig(
-    filename=f"./logs/log_{timestamp}.txt", # Need to run the program from Version X directory
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+def setup_logging():
+    # Create a unique filename per run
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_filename = f"./logs/{timestamp}.log"
 
-# Capture print()
-class PrintToLogger:
-    def write(self, message):
-        if message.strip():
-            logging.info(message.strip())
-    def flush(self):
-        pass
+    # Create logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
 
-sys.stdout = PrintToLogger()
+    # Create formatter
+    formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s"
+    )
+
+    # File handler (writes to file)
+    file_handler = logging.FileHandler(log_filename)
+    file_handler.setFormatter(formatter)
+
+    # Console handler (prints to terminal)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    # Add both handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    # Capture print() by redirecting standard out into a logging INFO message
+    class PrintToLogger:
+        def write(self, message):
+            if message.strip():
+                logging.info(message.strip())
+        def flush(self):
+            pass
+
+    sys.stdout = PrintToLogger()
