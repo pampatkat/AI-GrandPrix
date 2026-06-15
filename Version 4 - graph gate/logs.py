@@ -1,6 +1,7 @@
 import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 
 # Instead of print(msg)
 # logging.info(msg)
@@ -21,7 +22,7 @@ from datetime import datetime
 def setup_logging():
     # Create a unique filename per run
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_filename = f"./logs/{timestamp}.log"
+    # log_filename = f"./logs/{timestamp}.log"
 
     # Create logger
     logger = logging.getLogger()
@@ -31,6 +32,13 @@ def setup_logging():
     formatter = logging.Formatter(
         "%(asctime)s - %(levelname)s - %(message)s"
     )
+
+    # Create ./logs/ folder if doesn't exist
+    log_dir = Path("./logs")
+    log_dir.mkdir(exist_ok=True)  # ✅ creates folder if missing
+
+    log_filename = log_dir / f"{timestamp}.log"
+
 
     # File handler (writes to file)
     file_handler = logging.FileHandler(log_filename)
