@@ -5,6 +5,8 @@ from pymavlink import mavutil
 
 from gate_controller import GateController, GateControlConfig
 
+import navigation
+
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
 MAVLINK_CMD_SIM_RESET = 31000
@@ -259,7 +261,9 @@ class Controller:
         # send automated targets to sim flight controller
         #update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
         # alternatively one of
-        #update_motor_control(self.sim_conn, self.system_boot_ms)
+        # update_position_flight_control(self.sim_conn, self.system_boot_ms)
+        # update_motor_control(self.sim_conn, self.system_boot_ms)
+        # navigation.handle_user_input(self)
 
         if self.holding:
             # Keep the throttle fully down so the drone stays parked on the start
