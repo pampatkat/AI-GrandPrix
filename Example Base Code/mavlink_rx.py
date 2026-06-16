@@ -23,7 +23,7 @@ class MAVLinkRX:
         rx = cls(mavlink_connection, data)
         rx.thread = threading.Thread(
             target=rx.mavlink_receive_loop,
-            daemon = True
+            daemon = False
         )
         rx.is_running = True
         rx.thread.start()
@@ -42,15 +42,8 @@ class MAVLinkRX:
             try:
                 msg = self.mavlink_conn.recv_match(blocking=False)
             except ConnectionResetError:
-                # On Windows, sending UDP to a port with no listener (e.g. the
-                # simulator briefly closes/resets the socket) makes the OS return
-                # an ICMP "port unreachable", which surfaces here as
-                # ConnectionResetError (WSAECONNRESET / WinError 10054). UDP is
-                # connectionless and the socket is still usable, so treat this as
-                # transient: back off briefly and keep listening instead of
-                # killing the receive thread.
-                time.sleep(0.01)
-                continue
+                print('WARNING: ConnectionResetError was thrown. No longer listening to MAVLink port.')
+                return
 
             if msg is None:
                 time.sleep(0.001)
@@ -66,12 +59,6 @@ class MAVLinkRX:
             # --------------------------------------------------------------------------------------
             if msg_type == "HEARTBEAT":
                 self.on_heartbeat(msg)
-
-            # --------------------------------------------------------------------------------------
-            # COMMAND_ACK
-            # --------------------------------------------------------------------------------------
-            elif msg_type == "COMMAND_ACK":
-                self.on_command_ack(msg)
 
             # --------------------------------------------------------------------------------------
             # TIMESYNC
@@ -130,29 +117,7 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
-        armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-        try:
-            mode = mavutil.mode_string_v10(msg)
-        except Exception:
-            mode = "UNKNOWN"
-        self.data['heartbeat'] = {
-            'armed': armed,
-            'mode': mode,
-            'base_mode': msg.base_mode,
-            'custom_mode': msg.custom_mode,
-            'system_status': msg.system_status,
-            'type': msg.type,
-            'autopilot': msg.autopilot,
-            'time': time.time(),
-        }
-
-    def on_command_ack(self, msg):
-        self.data['last_command_ack'] = {
-            'command': msg.command,
-            'result': msg.result,
-            'progress': getattr(msg, 'progress', 0),
-            'time': time.time(),
-        }
+        armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
 
     def on_timesync(self, msg):
         request_time = msg.ts1
@@ -176,19 +141,6 @@ class MAVLinkRX:
         vel_z = msg.vz
         time_boot_ms = msg.time_boot_ms
 
-        # share the latest local position so the controller can lock onto it
-        # (position hold) during the countdown.
-        self.data['local_position'] = {
-            'x': pos_x,
-            'y': pos_y,
-            'z': pos_z,
-        }
-        self.data['local_velocity'] = {
-            'x': vel_x,
-            'y': vel_y,
-            'z': vel_z,
-        }
-
     def on_odometry(self, msg):
         pos_x, pos_y, pos_z = msg.x, msg.y, msg.z
         qx, qy, qz, qw = msg.q[1], msg.q[2], msg.q[3], msg.q[0]
@@ -198,23 +150,6 @@ class MAVLinkRX:
         yaw_speed = msg.yawspeed
         time_boot_us = msg.time_usec
         reset_count = msg.reset_counter
-
-        # also publish position from ODOMETRY as a fallback, in case the sim
-        # streams ODOMETRY instead of LOCAL_POSITION_NED. without this the
-        # controller never gets a position fix and falls back to holding the
-        # origin, which makes the drone drift during the countdown.
-        if not self.data.get('local_position'):
-            self.data['local_position'] = {
-                'x': pos_x,
-                'y': pos_y,
-                'z': pos_z,
-            }
-        if not self.data.get('local_velocity'):
-            self.data['local_velocity'] = {
-                'x': vel_x,
-                'y': vel_y,
-                'z': vel_z,
-            }
 
     def on_highres_imu(self, msg):
         acceleration_x, acceleration_y, acceleration_z = msg.xacc, msg.yacc, msg.zacc
@@ -241,15 +176,6 @@ class MAVLinkRX:
         # last_gate_race_time - race time in seconds when last gate was passed
         data_type, sim_boot_time_ms, race_start_boot_time_ms, race_finish_time_ns, active_gate_index, last_gate_race_time = struct.unpack_from(
             "<BQqqIq", raw_payload)
-
-        # share with the controller so the countdown can sync to the sim's clock
-        self.data['race_status'] = {
-            'sim_boot_time_ms': sim_boot_time_ms,
-            'race_start_boot_time_ms': race_start_boot_time_ms,
-            'race_finish_time_ns': race_finish_time_ns,
-            'active_gate_index': active_gate_index,
-            'last_gate_race_time': last_gate_race_time,
-        }
 
     def on_track_data_packet(self, msg):
         raw_payload = bytes(msg.data)

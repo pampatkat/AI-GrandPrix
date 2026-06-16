@@ -68,12 +68,6 @@ class MAVLinkRX:
                 self.on_heartbeat(msg)
 
             # --------------------------------------------------------------------------------------
-            # COMMAND_ACK
-            # --------------------------------------------------------------------------------------
-            elif msg_type == "COMMAND_ACK":
-                self.on_command_ack(msg)
-
-            # --------------------------------------------------------------------------------------
             # TIMESYNC
             # --------------------------------------------------------------------------------------
             elif msg_type == "TIMESYNC":
@@ -130,29 +124,7 @@ class MAVLinkRX:
                 self.expected_num_track_chunks[track_data_transfer_id] = msg.packets
 
     def on_heartbeat(self, msg):
-        armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-        try:
-            mode = mavutil.mode_string_v10(msg)
-        except Exception:
-            mode = "UNKNOWN"
-        self.data['heartbeat'] = {
-            'armed': armed,
-            'mode': mode,
-            'base_mode': msg.base_mode,
-            'custom_mode': msg.custom_mode,
-            'system_status': msg.system_status,
-            'type': msg.type,
-            'autopilot': msg.autopilot,
-            'time': time.time(),
-        }
-
-    def on_command_ack(self, msg):
-        self.data['last_command_ack'] = {
-            'command': msg.command,
-            'result': msg.result,
-            'progress': getattr(msg, 'progress', 0),
-            'time': time.time(),
-        }
+        armed = msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
 
     def on_timesync(self, msg):
         request_time = msg.ts1
@@ -183,11 +155,6 @@ class MAVLinkRX:
             'y': pos_y,
             'z': pos_z,
         }
-        self.data['local_velocity'] = {
-            'x': vel_x,
-            'y': vel_y,
-            'z': vel_z,
-        }
 
     def on_odometry(self, msg):
         pos_x, pos_y, pos_z = msg.x, msg.y, msg.z
@@ -208,12 +175,6 @@ class MAVLinkRX:
                 'x': pos_x,
                 'y': pos_y,
                 'z': pos_z,
-            }
-        if not self.data.get('local_velocity'):
-            self.data['local_velocity'] = {
-                'x': vel_x,
-                'y': vel_y,
-                'z': vel_z,
             }
 
     def on_highres_imu(self, msg):

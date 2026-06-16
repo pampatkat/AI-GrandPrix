@@ -5,8 +5,6 @@ from pymavlink import mavutil
 
 from gate_controller import GateController, GateControlConfig
 
-import navigation
-
 # --------------------------------------------------------------------------------------
 # RESET COMMAND
 MAVLINK_CMD_SIM_RESET = 31000
@@ -33,26 +31,17 @@ def update_motor_control(mavlink_conn, system_boot_ms):
 # --------------------------------------------------------------------------------------
 # ATTITUDE CONTROLS
 # --------------------------------------------------------------------------------------
-# Forward speed is set by GateController.cruise_forward_pitch_deg (not here).
-ROLL_DEG = -0.00
+FORWARD_PITCH_DEG = -0.3  # negative pitch tilts the drone forward
+ROLL_DEG = -0.10
 YAW_DEG = 0.0
 BASE_THRUST = 0.30        # 0.0 - 1.0, lower cruise so the gate opening stays in view
 ALTITUDE_THRUST_GAIN = 0.012
 MIN_FLIGHT_THRUST = 0.15
 MAX_FLIGHT_THRUST = 0.30
 GATE_DETECTION_MAX_AGE_S = 0.35
-# Lateral steering: gate left/right in the image -> roll to center on the opening.
-GATE_ROLL_GAIN_DEG = -8.0
-MAX_GATE_ROLL_DEG = 6
-# Gate-frame tilt (orientation_deg): bank/yaw to align with the rotated gate.
-# Raise *_GAIN for stronger turn; raise MAX_* to allow a larger correction cap.
-GATE_ORIENTATION_ROLL_GAIN_DEG = 0.4
-MAX_GATE_ORIENTATION_ROLL_DEG = 4.0
-GATE_ORIENTATION_YAW_GAIN_DEG = 0.00
-MAX_GATE_ORIENTATION_YAW_DEG = 0.5
+GATE_ROLL_GAIN_DEG = -10.0
+MAX_GATE_ROLL_DEG = 4.5
 GATE_VERTICAL_THRUST_GAIN = 0.20
-# Level roll/yaw for this many seconds after the simulator reports a gate pass.
-POST_GATE_STRAIGHTEN_S = 1.5
 # Positive offset_y means the gate sits below image center (drone is too high).
 GATE_LOW_IN_FRAME_THRESHOLD = 0.25
 GATE_LOW_IN_FRAME_EXTRA_GAIN = 0.40
@@ -87,7 +76,7 @@ def update_attitude_flight_control(
         system_boot_ms,
         thrust=BASE_THRUST,
         roll_deg=ROLL_DEG,
-        pitch_deg=0.0,
+        pitch_deg=FORWARD_PITCH_DEG,
         yaw_deg=YAW_DEG):
     now_ms = int(time.time() * 1000)
     attitude = euler_to_quaternion(
@@ -205,8 +194,12 @@ def update_position_flight_control(mavlink_conn, system_boot_ms, vx=0.0, vy=0.0,
 
 CONTROL_HZ = 250
 
-# 15 km/h converted to m/s (unused in attitude+thrust mode; kept for reference).
+# 15 km/h converted to m/s. Positive body x moves the drone forward.
 FORWARD_VELOCITY = 15.0 / 3.6
+# Positive z is down in NED, so negative vz commands upward movement.
+UPWARD_VELOCITY_BIAS = -2.0
+ALTITUDE_HOLD_GAIN = 1.8
+MAX_VERTICAL_CORRECTION = 8.0
 VELOCITY_PRINT_INTERVAL_S = 0.5
 
 # If the simulator's boot clock jumps backwards by more than this, we assume the
@@ -233,26 +226,18 @@ class Controller:
         # phases so a backwards jump (sim restart) is detected from anywhere.
         self.prev_sim_ms = None
         self.roll_command_deg = ROLL_DEG
-        self.pitch_command_deg = 0.0
-        self.yaw_command_deg = YAW_DEG
+        self.pitch_command_deg = FORWARD_PITCH_DEG
         self.last_velocity_print_time = 0.0
         self.last_readiness_print_time = 0.0
-        self.last_reported_active_gate_index = None
-        self.last_reported_gate_pass_time = None
-        self.flight_straightening = False
-        # Robust gate follower
+        # Robust gate follower (PD + distance-based gain scheduling + loss
+        # handling). Seeded with the legacy single-gain values so the near-field
+        # behavior matches the old controller, while far gates now get scheduled
+        # extra authority. See gate_controller.py for the full design + tuning.
         self.gate_controller = GateController(GateControlConfig(
             roll_gain_deg=GATE_ROLL_GAIN_DEG,
             max_roll_near_deg=MAX_GATE_ROLL_DEG,
-            orientation_roll_gain_deg=GATE_ORIENTATION_ROLL_GAIN_DEG,
-            max_orientation_roll_deg=MAX_GATE_ORIENTATION_ROLL_DEG,
-            orientation_yaw_gain_deg=GATE_ORIENTATION_YAW_GAIN_DEG,
-            max_orientation_yaw_deg=MAX_GATE_ORIENTATION_YAW_DEG,
+            base_forward_pitch_deg=FORWARD_PITCH_DEG,
             thrust_gain=GATE_VERTICAL_THRUST_GAIN,
-            low_in_frame_threshold=GATE_LOW_IN_FRAME_THRESHOLD,
-            low_in_frame_extra_gain=GATE_LOW_IN_FRAME_EXTRA_GAIN,
-            post_pass_straighten_s=POST_GATE_STRAIGHTEN_S,
-            straighten_pitch_deg=0.0,
             confidence_min=0.45,
             detection_max_age_s=GATE_DETECTION_MAX_AGE_S,
         ))
@@ -261,9 +246,7 @@ class Controller:
         # send automated targets to sim flight controller
         #update_attitude_flight_control(self.sim_conn, self.system_boot_ms)
         # alternatively one of
-        # update_position_flight_control(self.sim_conn, self.system_boot_ms)
-        # update_motor_control(self.sim_conn, self.system_boot_ms)
-        # navigation.handle_user_input(self)
+        #update_motor_control(self.sim_conn, self.system_boot_ms)
 
         if self.holding:
             # Keep the throttle fully down so the drone stays parked on the start
@@ -283,13 +266,10 @@ class Controller:
             )
             self.roll_command_deg = gate_command.roll_deg
             self.pitch_command_deg = gate_command.pitch_deg
-            self.yaw_command_deg = gate_command.yaw_deg
-            self.flight_straightening = gate_command.straightening
             gate_thrust_correction = gate_command.thrust_correction
 
             # Keep exposing the (filtered) detection for the periodic printout.
             gate_detection = self.get_active_gate_detection()
-            self.print_gate_pass_event()
 
             self.flight_thrust = self._clamp(
                 BASE_THRUST
@@ -299,15 +279,13 @@ class Controller:
                 MAX_FLIGHT_THRUST
             )
 
-            # STABILIZE accepts attitude+thrust setpoints; velocity setpoints
-            # are ignored (the drone falls). Forward speed comes from pitch tilt.
+            # STABILIZE rejected velocity setpoints, so fly with attitude/thrust.
             update_attitude_flight_control(
                 self.sim_conn,
                 self.system_boot_ms,
                 thrust=self.flight_thrust,
                 roll_deg=self.roll_command_deg,
-                pitch_deg=self.pitch_command_deg,
-                yaw_deg=self.yaw_command_deg,
+                pitch_deg=self.pitch_command_deg
             )
             self.print_attitude_info(gate_detection)
 
@@ -323,7 +301,6 @@ class Controller:
         self.holding = True
         self.flight_thrust = 0.0
         self.roll_command_deg = ROLL_DEG
-        self.yaw_command_deg = YAW_DEG
 
     @staticmethod
     def _clamp(value, minimum, maximum):
@@ -361,21 +338,16 @@ class Controller:
         if ack:
             ack_text = f"command={ack.get('command')} result={ack.get('result')}"
         print(
-            f"\n[{label}]\n"
-            f"  vehicle : armed={heartbeat.get('armed', 'unknown')}  "
-            f"mode={heartbeat.get('mode', 'unknown')}  "
-            f"status={heartbeat.get('system_status', 'unknown')}\n"
-            f"  mavlink : base_mode={heartbeat.get('base_mode', 'unknown')}  "
-            f"custom_mode={heartbeat.get('custom_mode', 'unknown')}  ack=({ack_text})\n"
-            f"  position: x={local_position.get('x', 0.0): .2f}  "
-            f"y={local_position.get('y', 0.0): .2f}  "
-            f"z={local_position.get('z', 0.0): .2f}\n"
-            f"  velocity: x={local_velocity.get('x', 0.0): .2f}  "
-            f"y={local_velocity.get('y', 0.0): .2f}  "
-            f"z={local_velocity.get('z', 0.0): .2f}\n"
-            f"  race    : start_ms={race.get('race_start_boot_time_ms', 'unknown')}  "
-            f"active_gate={race.get('active_gate_index', 'unknown')}  "
-            f"last_gate_time={self.format_gate_race_time(race.get('last_gate_race_time'))}",
+            f"{label}: "
+            f"armed={heartbeat.get('armed', 'unknown')} "
+            f"mode={heartbeat.get('mode', 'unknown')} "
+            f"base_mode={heartbeat.get('base_mode', 'unknown')} "
+            f"custom_mode={heartbeat.get('custom_mode', 'unknown')} "
+            f"status={heartbeat.get('system_status', 'unknown')} "
+            f"ack=({ack_text}) "
+            f"pos=({local_position.get('x', 0.0):.2f}, {local_position.get('y', 0.0):.2f}, {local_position.get('z', 0.0):.2f}) "
+            f"vel=({local_velocity.get('x', 0.0):.2f}, {local_velocity.get('y', 0.0):.2f}, {local_velocity.get('z', 0.0):.2f}) "
+            f"race_start={race.get('race_start_boot_time_ms', 'unknown')}",
             flush=True
         )
 
@@ -386,85 +358,22 @@ class Controller:
 
         self.last_velocity_print_time = now
         local_velocity = self.data.get('local_velocity') or {}
-        race = self.data.get('race_status') or {}
-        gate_text = "none"
+        gate_text = "gate=none"
         if gate_detection:
-            orient = gate_detection.get('orientation_deg')
-            orient_text = f"  tilt={orient:+.1f}deg" if orient is not None else ""
-            pnp_text = ""
-            if gate_detection.get("pnp_valid"):
-                pnp_text = (
-                    f"  pnp_dist={gate_detection.get('pnp_distance_m', 0.0):.1f}m"
-                )
             gate_text = (
-                f"x={gate_detection.get('offset_x', 0.0):+.2f}  "
-                f"y={gate_detection.get('offset_y', 0.0):+.2f}  "
-                f"size={gate_detection.get('size_ratio', 0.0):.2f}  "
-                f"conf={gate_detection.get('confidence', 0.0):.2f}"
-                f"{orient_text}{pnp_text}"
+                "gate="
+                f"(x={gate_detection.get('offset_x', 0.0):+.2f}, "
+                f"y={gate_detection.get('offset_y', 0.0):+.2f}, "
+                f"size={gate_detection.get('size_ratio', 0.0):.2f}, "
+                f"conf={gate_detection.get('confidence', 0.0):.2f})"
             )
-        pitch_mode = "straight" if self.flight_straightening else "cruise"
         print(
-            "\n[Flight]\n"
-            f"  command : pitch={self.pitch_command_deg: .1f} deg ({pitch_mode})  "
-            f"roll={self.roll_command_deg: .1f} deg  "
-            f"yaw={self.yaw_command_deg: .1f} deg  "
-            f"thrust={self.flight_thrust:.2f}\n"
-            f"  velocity: x={local_velocity.get('x', 0.0): .2f}  "
-            f"y={local_velocity.get('y', 0.0): .2f}  "
-            f"z={local_velocity.get('z', 0.0): .2f} m/s\n"
-            f"  vision  : gate={gate_text}\n"
-            f"  race    : active_gate={race.get('active_gate_index', 'unknown')}  "
-            f"last_gate_time={self.format_gate_race_time(race.get('last_gate_race_time'))}",
+            "Attitude "
+            f"commanded=(pitch={self.pitch_command_deg:.1f} deg, roll={self.roll_command_deg:.1f} deg, thrust={self.flight_thrust:.2f}) "
+            f"actual=(x={local_velocity.get('x', 0.0):.2f}, y={local_velocity.get('y', 0.0):.2f}, z={local_velocity.get('z', 0.0):.2f}) m/s "
+            f"{gate_text}",
             flush=True
         )
-
-    def print_gate_pass_event(self):
-        race = self.data.get('race_status') or {}
-        active_gate_index = race.get('active_gate_index')
-        last_gate_time = race.get('last_gate_race_time')
-        if active_gate_index is None:
-            return
-
-        gate_time_changed = (
-            active_gate_index > 0 and
-            last_gate_time is not None
-            and last_gate_time >= 0
-            and last_gate_time != self.last_reported_gate_pass_time
-        )
-        gate_index_advanced = (
-            self.last_reported_active_gate_index is not None
-            and active_gate_index > self.last_reported_active_gate_index
-        )
-        if gate_time_changed or gate_index_advanced:
-            passed_gate_index = max(0, active_gate_index - 1)
-            self.gate_controller.notify_gate_passed()
-            self.data["last_gate_pass_event"] = {
-                "passed_gate_index": passed_gate_index,
-                "next_gate_index": active_gate_index,
-                "time": time.time(),
-            }
-            print(
-                "\n[Gate Passed]\n"
-                f"  simulator: passed_gate={passed_gate_index}  "
-                f"next_gate={active_gate_index}  "
-                f"race_time={self.format_gate_race_time(last_gate_time)}",
-                flush=True
-            )
-
-        self.last_reported_active_gate_index = active_gate_index
-        if last_gate_time is not None and last_gate_time >= 0:
-            self.last_reported_gate_pass_time = last_gate_time
-
-    @staticmethod
-    def format_gate_race_time(raw_time):
-        if raw_time is None or raw_time < 0:
-            return "none"
-        if raw_time >= 1_000_000_000:
-            return f"{raw_time / 1_000_000_000.0:.3f}s"
-        if raw_time >= 1_000:
-            return f"{raw_time / 1_000.0:.3f}s"
-        return f"{raw_time:.3f}s"
 
     # -------------------------------
     # Fly forward (move on x, keep y and z stable)
@@ -476,15 +385,7 @@ class Controller:
         self.holding = False
         self.flight_thrust = BASE_THRUST
         self.roll_command_deg = ROLL_DEG
-        self.yaw_command_deg = YAW_DEG
-        race = self.data.get('race_status') or {}
-        self.last_reported_active_gate_index = race.get('active_gate_index')
-        last_gate_time = race.get('last_gate_race_time')
-        self.last_reported_gate_pass_time = (
-            last_gate_time
-            if last_gate_time is not None and last_gate_time >= 0
-            else None
-        )
+        self.pitch_command_deg = FORWARD_PITCH_DEG
         # Clear any tracking state carried over from a previous race so we start
         # the new run wings-level with no stale derivative/decay history.
         self.gate_controller.reset()

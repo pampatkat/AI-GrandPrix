@@ -32,17 +32,16 @@ try:
     while is_running:
         print("Arming drone...", flush=True)
         controller.arm()
-        controller.wait_until_armed()
 
         # countdown begins automatically once the simulator schedules a race.
-        # the drone stays parked through "3... 2... 1..." then flies right on
-        # "GO!"
+        # the drone hovers in place through "3... 2... 1..." then flies forward
+        # on "GO!"
         print("Get ready...", flush=True)
         controller.run_countdown()
 
-        # fly right until the simulator is reset or a new race starts, then
+        # fly forward until the simulator is reset or a new race starts, then
         # loop back to re-arm and run the countdown again.
-        print("Flying right! (reset the simulator to run again, Ctrl+C to stop)", flush=True)
+        print("Flying forward! (reset the simulator to run again, Ctrl+C to stop)", flush=True)
         controller.fly_until_reset()
 
         print("Simulator reset detected - getting ready for the next run...\n", flush=True)
