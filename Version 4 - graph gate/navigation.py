@@ -9,6 +9,11 @@ SPEED_LATERAL = 2.0      # m/s for forward/back/strafe
 SPEED_VERTICAL = 2.0     # m/s for camera-up/down
 CAMERA_PITCH_OFFSET_DEG = 20.0  # camera is mounted +20 degrees pitch relative to body
 
+MANUAL_FORWARD_PITCH_DEG = 5.0  # nose-down angle for forward motion
+MANUAL_BACK_PITCH_DEG = -5.0    # nose-up angle for backward motion
+MANUAL_THRUST_STEP = 0.02       # thrust adjustment for E/C input
+MANUAL_BASE_THRUST = 0.2
+
 
 def _get_pressed_keys():
     try:
@@ -34,63 +39,52 @@ def _resolve_conflicts(keys):
     return keys
 
 
-def _calculate_camera_velocity(keys):
-    vx = (SPEED_LATERAL if keys['w'] else 0.0) + (-SPEED_LATERAL if keys['s'] else 0.0)
-    vy = (SPEED_LATERAL if keys['d'] else 0.0) + (-SPEED_LATERAL if keys['a'] else 0.0)
-    vz = (SPEED_VERTICAL if keys['c'] else 0.0) + (-SPEED_VERTICAL if keys['e'] else 0.0)
-    return vx, vy, vz
+def _calculate_manual_attitude_command(keys):
+    pitch_deg = 0.0
+    if keys['w']:
+        pitch_deg = MANUAL_FORWARD_PITCH_DEG
+    elif keys['s']:
+        pitch_deg = MANUAL_BACK_PITCH_DEG
+
+    thrust = MANUAL_BASE_THRUST
+    if keys['e']:
+        thrust += MANUAL_THRUST_STEP
+    elif keys['c']:
+        thrust -= MANUAL_THRUST_STEP
+
+    thrust = min(
+        max(thrust, controller.MIN_FLIGHT_THRUST),
+        controller.MAX_FLIGHT_THRUST,
+    )
+
+    return pitch_deg, thrust
 
 
 def handle_user_input(armed_controller):
-    """Minimal handler that maps WASD+E/C into camera-relative velocity.
+    """Minimal handler that maps WASD+E/C into attitude+thrust commands.
 
     - Reads keys and resolves conflicts.
-    - Builds camera-frame velocity vector.
-    - Transforms that velocity to NED using the camera attitude.
-    - Sends the resulting zero or non-zero velocity command.
+    - Builds a small pitch command for forward/back movement.
+    - Adjusts thrust for camera-up/camera-down.
+    - Preserves current yaw heading.
     """
     if not getattr(armed_controller, 'sim_conn', None):
         return
+    if getattr(armed_controller, 'system_boot_ms', None) is None:
+        raise ValueError('armed_controller.system_boot_ms is required')
 
     keys = _resolve_conflicts(_get_pressed_keys())
-    vx_cam, vy_cam, vz_cam = _calculate_camera_velocity(keys)
+    pitch_deg, thrust = _calculate_manual_attitude_command(keys)
 
-    # Always send an explicit velocity command, even when all inputs are zero.
     body_att = getattr(armed_controller, 'data', {}).get('attitude', {}) or {}
-    body_roll = float(body_att.get('roll', 0.0))
-    body_pitch = float(body_att.get('pitch', 0.0))
     body_yaw = float(body_att.get('yaw', 0.0))
 
-    camera_pitch = body_pitch + math.radians(CAMERA_PITCH_OFFSET_DEG)
-    camera_roll = body_roll
-    camera_yaw = body_yaw
-
-    cr = math.cos(camera_yaw)
-    sr = math.sin(camera_yaw)
-    ct = math.cos(camera_pitch)
-    st = math.sin(camera_pitch)
-    cp = math.cos(camera_roll)
-    sp = math.sin(camera_roll)
-
-    R00 = cr * ct
-    R01 = cr * st * sp - sr * cp
-    R02 = cr * st * cp + sr * sp
-
-    R10 = sr * ct
-    R11 = sr * st * sp + cr * cp
-    R12 = sr * st * cp - cr * sp
-
-    R20 = -st
-    R21 = ct * sp
-    R22 = ct * cp
-
-    vx_ned = R00 * vx_cam + R01 * vy_cam + R02 * vz_cam
-    vy_ned = R10 * vx_cam + R11 * vy_cam + R12 * vz_cam
-    vz_ned = R20 * vx_cam + R21 * vy_cam + R22 * vz_cam
-
-    controller.update_position_flight_control(
+    controller.update_attitude_flight_control(
         armed_controller.sim_conn,
         armed_controller.system_boot_ms,
-        {'vx': vx_ned, 'vy': vy_ned, 'vz': vz_ned}
+        thrust=thrust,
+        roll_deg=0.0,
+        pitch_deg=pitch_deg,
+        yaw_deg=body_yaw,
     )
     

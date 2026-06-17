@@ -2,7 +2,7 @@
 
 ## Overview & Purpose
 
-`navigation.py` implements FPS-style keyboard and mouse control for drone flight. The module translates user input (WASD for horizontal movement, E/C for camera-relative altitude changes, mouse for camera rotation) into NED-frame velocity commands sent to the flight controller at 250 Hz. ALL movement (horizontal and vertical) is relative to the camera's local axes (i.e., affected by camera yaw, pitch, and roll). The camera and vehicle body share the same origin; the camera is mounted tilted 20° upward relative to the body (camera pitch = body pitch + 20°). Mouse-driven camera motion and autonomous velocity inputs are planned as future integrations and should be supported by the attitude composition described below.
+`navigation.py` implements FPS-style keyboard for drone flight. The module translates user input into attitude and thrust commands sent to the flight controller at 250 Hz. WASD modifies the vehicle attitude setpoint at a fixed rate, while E/C select fixed thrust setpoints relative to a hover baseline. ALL movement is still interpreted through the camera's orientation because the camera and vehicle body share the same origin; the camera is mounted tilted 20° upward relative to the body (camera pitch = body pitch + 20°). Autonomous attitude inputs are planned as future integrations and should be supported by the attitude composition described below.
 
 ---
 
@@ -12,77 +12,64 @@
 
 | Requirement | Input | Output | Notes |
 |---|---|---|---|
-| **Forward/Backward** | W key (forward) / S key (backward) | Velocity in camera-forward direction at 2.0 m/s | Regardless of drone heading |
-| **Left/Right Strafe** | A key (left) / D key (right) | Velocity perpendicular to camera-forward (±90°) at 2.0 m/s | Perpendicular to forward direction |
-| **Altitude Control** | E key (up) / C key (down) | Velocity along camera-local vertical at 2.0 m/s (camera-up/down) | Camera-relative: affected by camera pitch and roll |
-| **Diagonal Movement** | W+A, W+D, S+A, S+D | Vector sum of individual directions at 2.0 m/s per axis | E.g., W+A = forward + left = 45° angle at (2.0, -2.0) NED |
-| **Conflict Resolution** | Conflicting keys (W+S or A+D) | Conflicting axes cancel to 0 | W+S → vx=0; A+D → vy=0; both → hover |
-| **No Input** | No keys pressed | vx=0, vy=0, vz=0 | Drone hovers |
+| **Forward/Backward Attitude** | W key / S key | Pitch attitude command incremented/-decremented at a fixed rate | W/S tilt the vehicle nose down/up for forward/back motion |
+| **Left/Right Attitude** | A key / D key | Roll attitude command incremented/-decremented at a fixed rate | A/D bank the vehicle left/right for lateral motion |
+| **Altitude Thrust** | E key (up) / C key (down) | Fixed thrust setpoint above/below hover thrust | E/C select discrete climb/descend power levels |
+| **Diagonal Input** | Any combination of WASD | Combined attitude targets across pitch and roll | Example: W+D produces pitch-down plus right-roll command |
+| **Conflict Resolution** | Conflicting keys (W+S or A+D) | Conflicting attitude changes cancel to 0 on that axis | W+S → no pitch change; A+D → no roll change |
+| **No Input** | No keys pressed | Hold hover thrust and level attitude | Vehicle should neither tilt nor change thrust from hover |
 | **Continuous Polling** | Key events | State checked every control cycle (every 4ms) | Handles key press/release at sub-frame speed |
-| **Heading-Aware Movement** | Any WASD input + drone yaw | Movement direction rotates with drone heading from MAVLink | Forward always = camera direction |
+| **Camera-Aware Attitude** | Attitude inputs + camera mount offset | Body attitude commands are composed with camera pitch offset | Camera is tilted +20° relative to the body |
 
 ### Non-Functional Requirements
 
 | Requirement | Specification |
 |---|---|
 | **Update Frequency** | Called every control cycle: 250 Hz (every 4 ms) |
-| **Velocity Frame** | NED (North-East-Down): vx=north, vy=east, vz=down(positive=DOWN) |
-| **Speed Magnitude** | 2.0 m/s for all directions (lateral and vertical) |
+| **Control Mode** | Attitude + thrust setpoints, not direct velocity commands |
+| **Hover Thrust** | Base thrust is exactly the hover thrust required to balance gravity assuming starting attitude |
+| **Thrust Values** | E/C select fixed thrust values relative to hover |
+| **Attitude Rate** | WASD changes attitude at a fixed command rate or fixed incremental setpoint |
 | **Response Latency** | <4ms (next control cycle at latest) |
-| **Velocity Application** | Instant change (no acceleration ramping) |
 | **Camera Attitude Source** | `armed_controller.data['attitude']['roll']`, `['pitch']`, `['yaw']` (radians) |
-| **Coordinate Transform** | Camera-relative movement (WASD + E/C) → NED frame using full attitude rotation (roll, pitch, yaw) |
+| **Reference Frame** | Attitude commands are expressed in the body/camera frame, with camera pitch offset applied |
 
 ---
 
-## 2. COORDINATE FRAMES & MATHEMATICAL FOUNDATION
+## 2. ATTITUDE CONTROL FRAMEWORK
 
-### NED Frame (Used by Controller API)
-- **North (vx)**: Positive north, negative south
-- **East (vy)**: Positive east, negative west  
-- **Down (vz)**: Positive down, negative up (note: inverted from typical +Z up convention)
-- **Yaw (ψ)**: Drone heading in radians; 0 = north, +π/2 = east, +π or -π = south, -π/2 = west
+## 2. ATTITUDE CONTROL FRAMEWORK
 
-### Camera-Relative Frame (User Input WASD + E/C)
-- Camera axes (camera/body frame):
-    - `x` (forward): positive in the direction the camera is pointing
-    - `y` (right): positive to the camera's right (pressing `D` yields positive `y`)
-    - `z` (down): positive down relative to the camera (consistent with NED's down sign)
-- **Forward (W)**: positive `x` in camera frame
-- **Left (A)**: negative `y` in camera frame
-- **Backward (S)**: negative `x` in camera frame
-- **Right (D)**: positive `y` in camera frame
-- **Up/Down (E/C)**: up = negative `z` in camera frame (E → negative `z`), down = positive `z` (C → positive `z`)
+### Body/Camera Attitude
+- The body and camera share the same origin.
+- Camera attitude is derived from body attitude by applying a fixed camera mount offset:
+    - `camera_roll = body_roll`
+    - `camera_pitch = body_pitch + CAMERA_PITCH_OFFSET`
+    - `camera_yaw = body_yaw`
+- This means user-facing camera directions remain aligned with the camera pointing direction while the flight controller receives body attitude targets.
 
-### Transformation: Camera-Relative → NED (Full 3D)
-Camera-relative velocities are expressed in the camera/body frame as a 3-vector `v_cam = [vx_cam, vy_cam, vz_cam]` where `vx_cam` is forward, `vy_cam` is right, and `vz_cam` is down (positive down). To convert `v_cam` to NED/inertial coordinates `v_ned`, apply the rotation defined by the camera/world attitude (roll φ, pitch θ, yaw ψ):
+### WASD Attitude Mapping
+- `W`/`S` adjust the pitch attitude target at a fixed command rate or incremental angle.
+    - `W` tilts the nose down for forward movement.
+    - `S` tilts the nose up for backward movement.
+- `A`/`D` adjust the roll attitude target at a fixed command rate or incremental angle.
+    - `A` rolls left for leftward motion.
+    - `D` rolls right for rightward motion.
+- Simultaneous WASD combinations produce combined pitch+roll attitude setpoints.
+- Conflicting WASD keys on the same axis cancel each other.
+- No WASD input means maintain the current level attitude target.
 
-```
-R = R_z(psi) * R_y(theta) * R_x(phi)
+### E/C Thrust Mapping
+- `E` selects a fixed thrust setpoint above hover thrust to climb.
+- `C` selects a fixed thrust setpoint below hover thrust to descend.
+- No E/C input holds hover thrust exactly equal to the thrust required to balance gravity.
+- Thrust selection is discrete, not a direct vertical velocity command.
 
-# where
-R_x(phi) = [[1, 0, 0], [0, cos(phi), -sin(phi)], [0, sin(phi), cos(phi)]]
-R_y(theta) = [[cos(theta), 0, sin(theta)], [0, 1, 0], [-sin(theta), 0, cos(theta)]]
-R_z(psi) = [[cos(psi), -sin(psi), 0], [sin(psi), cos(psi), 0], [0, 0, 1]]
-
-v_ned = R * v_cam
-```
-
-This reduces to the 2D yaw-only rotation when `phi = 0` and `theta = 0` (level camera).
-
-**Example (level camera, phi=0, theta=0, psi=π/2):**
-- User presses W (forward): `v_cam = [2, 0, 0]` → `v_ned = [0, 2, 0]` (moves East)
-
-**Example (pitched camera):**
-- If camera is pitched down (θ > 0), pressing E (camera-up) will produce an upward component in NED plus forward/back components depending on pitch and roll.
-
-### Altitude (camera-relative `vz`)
-- In camera frame: `vz_cam` is positive down. Key mappings (camera frame):
-    - **E key**: `vz_cam = -2.0` (camera-up)
-    - **C key**: `vz_cam = +2.0` (camera-down)
-    - **No input**: `vz_cam = 0`
-
-After building the full camera-relative velocity vector `[vx_cam, vy_cam, vz_cam]`, transform it to NED using the full attitude rotation `R(roll,pitch,yaw)` described above, and send the resulting `v_ned` to the controller API.
+### Motion Semantics
+- Forward/back motion is produced by changing pitch, not by commanding a forward velocity.
+- Left/right motion is produced by changing roll, not by commanding a lateral velocity.
+- Vertical motion is produced by thrust changes, not by commanding a vertical velocity.
+- The controller receives attitude+thrust setpoints at 250 Hz.
 
 ---
 
@@ -106,19 +93,24 @@ def handle_user_input(armed_controller: Controller) -> None
     - Other state keys (optional for this function)
 
 **Outputs:**
-- None (side effect: calls `controller.update_position_flight_control()`)
+- None (side effect: calls `controller.update_attitude_flight_control()`)
 
 **Behavior:**
 1. Poll all relevant keys (W, A, S, D, E, C)
-2. Resolve conflicts (W+S → both cancel, A+D → both cancel)
-3. Build velocity vector from remaining keys
-4. Retrieve body attitude from `armed_controller.data['attitude']` (use roll, pitch, yaw)
+2. Resolve conflicts (W+S → both cancel, A+D → both cancel, E+C → both cancel)
+3. Compute attitude targets from WASD input:
+     - `W`/`S` adjust pitch at a fixed command rate or fixed incremental step
+     - `A`/`D` adjust roll at a fixed command rate or fixed incremental step
+4. Determine thrust setpoint from E/C:
+     - no E/C → hover thrust exactly balancing gravity
+     - E → fixed climb thrust above hover
+     - C → fixed descend thrust below hover
+5. Retrieve body attitude from `armed_controller.data['attitude']` (use roll, pitch, yaw)
      - Compute `camera_attitude` by applying the fixed camera mount offset (pitch +20°) and any optional mouse-driven deltas:
          `camera_attitude.roll = body_roll + mouse_roll_delta` (if provided)
          `camera_attitude.pitch = body_pitch + CAMERA_PITCH_OFFSET + mouse_pitch_delta`
          `camera_attitude.yaw = body_yaw + mouse_yaw_delta`
-5. Transform camera-relative velocity to NED frame using `camera_attitude` full rotation (roll, pitch, yaw)
-6. Call `controller.update_position_flight_control(armed_controller.sim_conn, armed_controller.system_boot_ms, velocity_dict)`
+6. Call `controller.update_attitude_flight_control(armed_controller.sim_conn, armed_controller.system_boot_ms, thrust=thrust, roll_deg=roll_command, pitch_deg=pitch_command, yaw_deg=yaw_command)`
 7. Return (no output)
 
 **Error Handling:**
@@ -294,13 +286,14 @@ KEY_UP = 'e'
 KEY_DOWN = 'c'
 ```
 
-### Velocity Dict Structure
-Passed to `controller.update_position_flight_control()`:
+### Control Setpoint Structure
+Passed to `controller.update_attitude_flight_control()`:
 ```python
 {
-    'vx': float,  # NED North [m/s]
-    'vy': float,  # NED East [m/s]
-    'vz': float   # NED Down [m/s]
+    'thrust': float,   # normalized collective thrust [0.0 .. 1.0]
+    'roll_deg': float,  # body roll attitude target in degrees
+    'pitch_deg': float, # body pitch attitude target in degrees
+    'yaw_deg': float,   # body yaw attitude target in degrees
 }
 ```
 
@@ -327,24 +320,26 @@ handle_user_input(armed_controller)
   │   └─ Return dict: {'w': bool, 'a': bool, 's': bool, 'd': bool, 'e': bool, 'c': bool}
   │
   ├─ keys = _resolve_conflicts(keys)
-  │   └─ If W and S both pressed, set both False
-  │   └─ If A and D both pressed, set both False
-  │   └─ If E and C both pressed, set both False
+  │   └─ Cancel W/S, A/D, E/C conflicts on the same axis
   │
-  ├─ velocity_camera = _calculate_velocity_camera_frame(keys)
-  │   └─ vx = 2*w - 2*s
-  │   └─ vy = -2*a + 2*d
-  │   └─ vz = 2*c - 2*e
+  ├─ attitude_command = _calculate_attitude_command(keys)
+  │   └─ pitch_command = fixed step from W/S
+  │   └─ roll_command = fixed step from A/D
   │
-    ├─ attitude = armed_controller.data['attitude'] (handle missing keys; use roll,pitch,yaw)
-  
-    ├─ velocity_ned = _transform_to_ned(velocity_camera, attitude)
-    │   └─ v_ned = R(roll,pitch,yaw) * v_cam  # full 3D rotation described above
+  ├─ thrust_command = _calculate_thrust_command(keys)
+  │   └─ hover thrust if no E/C
+  │   └─ climb thrust if E
+  │   └─ descend thrust if C
   │
-  └─ controller.update_position_flight_control(
+  ├─ yaw_command = body_yaw from armed_controller.data['attitude']
+  │
+  └─ controller.update_attitude_flight_control(
         armed_controller.sim_conn,
         armed_controller.system_boot_ms,
-        velocity_ned
+        thrust=thrust_command,
+        roll_deg=roll_command,
+        pitch_deg=pitch_command,
+        yaw_deg=yaw_command,
      )
 ```
 
@@ -354,10 +349,10 @@ handle_user_input(armed_controller)
 
 | Case | Scenario | Expected Behavior | Implementation |
 |---|---|---|---|
-| **No keys pressed** | All keys released | Velocity = (0, 0, 0); drone hovers | _get_pressed_keys() returns all False |
-| **Conflicting forward/backward** | W and S both pressed | Both cancel; vx = 0 | _resolve_conflicts() sets both False |
-| **Conflicting left/right** | A and D both pressed | Both cancel; vy = 0 | _resolve_conflicts() sets both False |
-| **Conflicting altitude** | E and C both pressed | Both cancel; vz = 0 | _resolve_conflicts() sets both False |
+| **No keys pressed** | All keys released | Level attitude and hover thrust held; drone hovers | _get_pressed_keys() returns all False |
+| **Conflicting forward/backward** | W and S both pressed | Both cancel; no pitch command change | _resolve_conflicts() sets both False |
+| **Conflicting left/right** | A and D both pressed | Both cancel; no roll command change | _resolve_conflicts() sets both False |
+| **Conflicting altitude** | E and C both pressed | Both cancel; hover thrust remains unchanged | _resolve_conflicts() sets both False |
 | **Multiple conflicts** | W+S+A+D all pressed | All cancel; hover | All resolve to False in _resolve_conflicts() |
 | **Rapid key toggle** | Key pressed/released faster than control cycle | Detected on next frame (within 4ms) | keyboard.is_pressed() polled every cycle |
 | **Missing attitude (roll/pitch/yaw)** | `shared_data['attitude']` missing or incomplete | Assume roll=0,pitch=0,yaw=0; log warning | Try/except, default to neutral attitude with warning log |
@@ -380,61 +375,60 @@ Input: {'w': True, 's': True, 'a': False, 'd': False, 'e': False, 'c': False}
 Expected: {'w': False, 's': False, 'a': False, 'd': False, 'e': False, 'c': False}
 ```
 
-**Test 2: No Keys**
+**Test 2: Attitude Command Generation**
 ```
-Test: _calculate_velocity_camera_frame()
-Input: {'w': False, 'a': False, 's': False, 'd': False, 'e': False, 'c': False}
-Expected: {'vx': 0.0, 'vy': 0.0, 'vz': 0.0}
-```
-
-**Test 3: Single Directions**
-```
-Test: _calculate_velocity_camera_frame()
-- W only → {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}
-- A only → {'vx': 0.0, 'vy': -2.0, 'vz': 0.0}
-- E only → {'vx': 0.0, 'vy': 0.0, 'vz': -2.0}
+Test: _calculate_attitude_command()
+Input: {'w': True, 'a': False, 's': False, 'd': False, 'e': False, 'c': False}
+Expected: pitch_command = forward pitch step, roll_command = 0
 ```
 
-**Test 4: Diagonal Movement**
+**Test 3: Roll Command Generation**
 ```
-Test: _calculate_velocity_camera_frame()
-Input: {'w': True, 'a': True, 's': False, 'd': False, 'e': False, 'c': False}
-Expected: {'vx': 2.0, 'vy': -2.0, 'vz': 0.0}
-```
-
-**Test 5: NED Transformation (Yaw = 0, pointing North)**
-```
-Test: _transform_to_ned()
-Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, attitude = {'roll':0, 'pitch':0, 'yaw':0}
-Expected: {'vx': 2.0, 'vy': 0.0, 'vz': 0.0} (moves North)
+Test: _calculate_attitude_command()
+Input: {'w': False, 'a': True, 's': False, 'd': False, 'e': False, 'c': False}
+Expected: roll_command = left roll step, pitch_command = 0
 ```
 
-**Test 6: NED Transformation (Yaw = π/2, pointing East)**
+**Test 4: Thrust Mode Selection**
 ```
-Test: _transform_to_ned()
-Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, attitude = {'roll':0, 'pitch':0, 'yaw':π/2}
-Expected: {'vx': ≈0, 'vy': 2.0, 'vz': 0.0} (moves East)
-```
-
-**Test 7: NED Transformation (Yaw = π/4, 45° heading)**
-```
-Test: _transform_to_ned()
-Input: velocity_camera = {'vx': 2.0, 'vy': 0.0, 'vz': 0.0}, attitude = {'roll':0, 'pitch':0, 'yaw':π/4}
-Expected: {'vx': √2, 'vy': √2, 'vz': 0.0} (moves northeast at 45°)
+Test: _calculate_thrust_command()
+Input: {'w': False, 'a': False, 's': False, 'd': False, 'e': True, 'c': False}
+Expected: thrust_command = fixed climb thrust above hover
 ```
 
-**Test 8: Altitude with Level Camera (independent of yaw)**
+**Test 5: Hover Thrust**
 ```
-Test: _transform_to_ned() with roll=0, pitch=0 and various yaw values
-Input: E key (vz_cam = -2.0)
-Expected: v_ned == {'vx': 0.0, 'vy': 0.0, 'vz': -2.0} for any yaw
+Test: _calculate_thrust_command()
+Input: {'e': False, 'c': False}
+Expected: thrust_command = exact hover thrust
 ```
 
-**Test 9: Altitude Affected by Pitch/Roll**
+**Test 6: Combined Attitude**
 ```
-Test: _transform_to_ned() with non-zero pitch (θ) or roll (φ)
-Input: E key (vz_cam = -2.0), pitch = 30° (θ ≈ 0.524 rad)
-Expected: v_ned has a negative vz component (up) plus non-zero vx/vy components corresponding to the camera orientation
+Test: _calculate_attitude_command()
+Input: {'w': True, 'd': True, 's': False, 'a': False, 'e': False, 'c': False}
+Expected: pitch_command = forward pitch step, roll_command = right roll step
+```
+
+**Test 7: No Input**
+```
+Test: handle_user_input()
+Input: no keys pressed
+Expected: controller.update_attitude_flight_control() called with hover thrust and roll/pitch targets of 0
+```
+
+**Test 8: Conflict Cancellation on Attitude**
+```
+Test: _resolve_conflicts()
+Input: {'w': True, 's': True, 'a': True, 'd': True, 'e': True, 'c': True}
+Expected: all keys cancel, no attitude or thrust change
+```
+
+**Test 9: Camera Offset Preservation**
+```
+Test: body attitude composition
+Input: body_pitch = 0.0, CAMERA_PITCH_OFFSET = 20.0
+Expected: camera_pitch = 20.0 degrees above body pitch
 ```
 
 ### Integration Tests (with Simulator)
@@ -479,10 +473,8 @@ Expected: v_ned has a negative vz component (up) plus non-zero vx/vy components 
 ### Manual Verification (Simulator/Flight)
 
 1. **Responsiveness**: Feel of control (should be smooth and reactive at 250 Hz)
-2. **FPS-Style Feel**: Movement matches player expectations from FPS games
-3. **No Jitter**: Smooth acceleration/deceleration when changing inputs
-4. **Intuitive Heading**: Camera rotation affects movement direction naturally
-5. **Diagonal Smoothness**: 45° movements are smooth and predictable
+2. **Intuitive Heading**: Camera rotation affects movement direction naturally
+3. **Diagonal Smoothness**: 45° movements are smooth and predictable
 
 ---
 
@@ -494,16 +486,13 @@ Expected: v_ned has a negative vz component (up) plus non-zero vx/vy components 
 - Camera-relative vertical movement (E, C)
 - NED frame transformation
 - 250 Hz control loop integration
-- Instant velocity changes (no ramping)
 - Continuous polling (handles key events at sub-frame granularity)
 
 ### Excluded (Future Enhancements)
-- Mouse control for camera rotation — planned; specs reserve hooks for mouse-driven camera deltas applied to the camera attitude (roll/pitch/yaw).
-- Autonomous movement integration (external/autonomy velocity commands) — planned; leave API hooks to merge or prioritize external velocity targets with live user input.
+- Autonomous movement integration (external/autonomy velocity commands) — planned; leave API hooks to merge or prioritize external attitude targets with live user input.
 
 ### Assumptions
 - Drone is already armed (no arming logic in navigation.py)
 - MAVLink attitude state is populated and available
-- Flight controller can accept NED velocity commands
 - No GPS/vision feedback required for basic movement
 - Keyboard library (used by existing code) is available

@@ -139,7 +139,7 @@ class VisionRX:
             detection["distance_estimate_m"] = None
         self._record_metric_sample(detection)
         self.data["gate_detection"] = detection
-        self.print_gate_debug(detection)
+        # self.print_gate_debug(detection)
         if SHOW_FPV_OVERLAY:
             overlay = self.draw_gate_overlay(img, detection)
             self.data["fpv_overlay"] = overlay
