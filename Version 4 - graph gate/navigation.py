@@ -9,10 +9,12 @@ SPEED_LATERAL = 2.0      # m/s for forward/back/strafe
 SPEED_VERTICAL = 2.0     # m/s for camera-up/down
 CAMERA_PITCH_OFFSET_DEG = 20.0  # camera is mounted +20 degrees pitch relative to body
 
-MANUAL_FORWARD_PITCH_DEG = 5.0  # nose-down angle for forward motion
-MANUAL_BACK_PITCH_DEG = -5.0    # nose-up angle for backward motion
-MANUAL_THRUST_STEP = 0.02       # thrust adjustment for E/C input
-MANUAL_BASE_THRUST = 0.2
+MANUAL_FORWARD_PITCH_DEG =  5.0     # nose-down angle for forward motion
+MANUAL_BACK_PITCH_DEG =     -5.0    # nose-up angle for backward motion
+MANUAL_LEFT_ROLL_DEG =      5.0     # roll-left angle for leftward motion
+MANUAL_RIGHT_ROLL_DEG =     -5.0    # roll-right angle for rightward motion
+MANUAL_THRUST_STEP =        0.1     # thrust adjustment for E/C input
+MANUAL_BASE_THRUST =        0.275
 
 
 def _get_pressed_keys():
@@ -40,6 +42,12 @@ def _resolve_conflicts(keys):
 
 
 def _calculate_manual_attitude_command(keys):
+    roll_deg = 0.0
+    if keys['a']:
+        roll_deg = MANUAL_LEFT_ROLL_DEG
+    elif keys['d']:
+        roll_deg = MANUAL_RIGHT_ROLL_DEG
+
     pitch_deg = 0.0
     if keys['w']:
         pitch_deg = MANUAL_FORWARD_PITCH_DEG
@@ -57,7 +65,7 @@ def _calculate_manual_attitude_command(keys):
         controller.MAX_FLIGHT_THRUST,
     )
 
-    return pitch_deg, thrust
+    return roll_deg, pitch_deg, thrust
 
 
 def handle_user_input(armed_controller):
@@ -74,7 +82,7 @@ def handle_user_input(armed_controller):
         raise ValueError('armed_controller.system_boot_ms is required')
 
     keys = _resolve_conflicts(_get_pressed_keys())
-    pitch_deg, thrust = _calculate_manual_attitude_command(keys)
+    roll_deg, pitch_deg, thrust = _calculate_manual_attitude_command(keys)
 
     body_att = getattr(armed_controller, 'data', {}).get('attitude', {}) or {}
     body_yaw = float(body_att.get('yaw', 0.0))
@@ -83,7 +91,7 @@ def handle_user_input(armed_controller):
         armed_controller.sim_conn,
         armed_controller.system_boot_ms,
         thrust=thrust,
-        roll_deg=0.0,
+        roll_deg=roll_deg,
         pitch_deg=pitch_deg,
         yaw_deg=body_yaw,
     )
