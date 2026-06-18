@@ -2,7 +2,7 @@
 
 ## Overview & Purpose
 
-`navigation.py` implements FPS-style keyboard for drone flight. The module translates user input into attitude and thrust commands sent to the flight controller at 250 Hz. WASD modifies the vehicle attitude setpoint at a fixed rate, while E/C select fixed thrust setpoints relative to a hover baseline. ALL movement is still interpreted through the camera's orientation because the camera and vehicle body share the same origin; the camera is mounted tilted 20° upward relative to the body (camera pitch = body pitch + 20°). Autonomous attitude inputs are planned as future integrations and should be supported by the attitude composition described below.
+`navigation.py` implements FPS-style keyboard for drone flight. The module translates user input into attitude and thrust commands sent to the flight controller at 250 Hz. WASD modifies the vehicle attitude setpoint at a fixed rate, Q/E adjusts yaw heading, and V/C select fixed thrust setpoints relative to a hover baseline. ALL movement is still interpreted through the camera's orientation because the camera and vehicle body share the same origin; the camera is mounted tilted 20° upward relative to the body (camera pitch = body pitch + 20°). Autonomous attitude inputs are planned as future integrations and should be supported by the attitude composition described below.
 
 ---
 
@@ -14,7 +14,8 @@
 |---|---|---|---|
 | **Forward/Backward Attitude** | W key / S key | Pitch attitude command incremented/-decremented at a fixed rate | W/S tilt the vehicle nose down/up for forward/back motion |
 | **Left/Right Attitude** | A key / D key | Roll attitude command incremented/-decremented at a fixed rate | A/D bank the vehicle left/right for lateral motion |
-| **Altitude Thrust** | E key (up) / C key (down) | Fixed thrust setpoint above/below hover thrust | E/C select discrete climb/descend power levels |
+| **Yaw Heading** | Q key / E key | Yaw attitude command incremented/-decremented at a fixed step | Q/E rotate vehicle heading positively/negatively |
+| **Altitude Thrust** | V key (up) / C key (down) | Fixed thrust setpoint above/below hover thrust | V/C select discrete climb/descend power levels |
 | **Diagonal Input** | Any combination of WASD | Combined attitude targets across pitch and roll | Example: W+D produces pitch-down plus right-roll command |
 | **Conflict Resolution** | Conflicting keys (W+S or A+D) | Conflicting attitude changes cancel to 0 on that axis | W+S → no pitch change; A+D → no roll change |
 | **No Input** | No keys pressed | Hold hover thrust and level attitude | Vehicle should neither tilt nor change thrust from hover |
@@ -28,7 +29,7 @@
 | **Update Frequency** | Called every control cycle: 250 Hz (every 4 ms) |
 | **Control Mode** | Attitude + thrust setpoints, not direct velocity commands |
 | **Hover Thrust** | Base thrust is exactly the hover thrust required to balance gravity assuming starting attitude |
-| **Thrust Values** | E/C select fixed thrust values relative to hover |
+| **Thrust Values** | V/C select fixed thrust values relative to hover |
 | **Attitude Rate** | WASD changes attitude at a fixed command rate or fixed incremental setpoint |
 | **Response Latency** | <4ms (next control cycle at latest) |
 | **Camera Attitude Source** | `armed_controller.data['attitude']['roll']`, `['pitch']`, `['yaw']` (radians) |
@@ -57,10 +58,10 @@
 - Conflicting WASD keys on the same axis cancel each other.
 - No WASD input means maintain the current level attitude target.
 
-### E/C Thrust Mapping
-- `E` selects a fixed thrust setpoint above hover thrust to climb.
+### V/C Thrust Mapping
+- `V` selects a fixed thrust setpoint above hover thrust to climb.
 - `C` selects a fixed thrust setpoint below hover thrust to descend.
-- No E/C input holds hover thrust exactly equal to the thrust required to balance gravity.
+- No V/C input holds hover thrust exactly equal to the thrust required to balance gravity.
 - Thrust selection is discrete, not a direct vertical velocity command.
 
 ### Motion Semantics
@@ -94,14 +95,15 @@ def handle_user_input(armed_controller: Controller) -> None
 - None (side effect: calls `controller.update_attitude_flight_control()`)
 
 **Behavior:**
-1. Poll all relevant keys (W, A, S, D, E, C)
-2. Resolve conflicts (W+S → both cancel, A+D → both cancel, E+C → both cancel)
+1. Poll all relevant keys (W, A, S, D, Q, E, V, C)
+2. Resolve conflicts (W+S → both cancel, A+D → both cancel, Q+E → both cancel, V+C → both cancel)
 3. Compute attitude targets from WASD input:
      - `W`/`S` adjust pitch at a fixed command rate or fixed incremental step
      - `A`/`D` adjust roll at a fixed command rate or fixed incremental step
-4. Determine thrust setpoint from E/C:
-     - no E/C → hover thrust exactly balancing gravity
-     - E → fixed climb thrust above hover
+     - `Q`/`E` adjust yaw heading at a fixed incremental step
+4. Determine thrust setpoint from V/C:
+     - no V/C → hover thrust exactly balancing gravity
+     - V → fixed climb thrust above hover
      - C → fixed descend thrust below hover
 5. Retrieve body attitude from `armed_controller.data['attitude']` (use roll, pitch, yaw)
      - Compute `camera_attitude` by applying the fixed camera mount offset (pitch +20°) and any optional mouse-driven deltas:
@@ -134,7 +136,9 @@ def _get_pressed_keys() -> Dict[str, bool]
     'a': bool,
     's': bool,
     'd': bool,
+    'q': bool,
     'e': bool,
+    'v': bool,
     'c': bool
 }
 ```
@@ -162,7 +166,9 @@ def _resolve_conflicts(keys: Dict[str, bool]) -> Dict[str, bool]
     'a': bool,
     's': bool,
     'd': bool,
+    'q': bool,
     'e': bool,
+    'v': bool,
     'c': bool
 }
 ```
@@ -174,30 +180,33 @@ def _resolve_conflicts(keys: Dict[str, bool]) -> Dict[str, bool]
     'a': bool,  # False if both A and D pressed
     's': bool,  # False if both W and S pressed
     'd': bool,  # False if both A and D pressed
-    'e': bool,  # (no conflict resolution needed)
-    'c': bool   # (no conflict resolution needed)
+    'q': bool,  # False if both Q and E pressed
+    'e': bool,  # False if both Q and E pressed
+    'v': bool,  # False if both V and C pressed
+    'c': bool   # False if both V and C pressed
 }
 ```
 
 **Conflict Resolution Rules:**
 1. If `keys['w']` and `keys['s']` both True: set both to False
 2. If `keys['a']` and `keys['d']` both True: set both to False
-3. If `keys['e']` and `keys['c']` both True: set both to False (altitude conflict)
-4. Return modified dict
+3. If `keys['q']` and `keys['e']` both True: set both to False (yaw conflict)
+4. If `keys['v']` and `keys['c']` both True: set both to False (thrust conflict)
+5. Return modified dict
 
 **Example:**
-- Input: `{'w': True, 's': True, 'a': False, 'd': True, 'e': False, 'c': False}`
-- After resolution: `{'w': False, 's': False, 'a': False, 'd': True, 'e': False, 'c': False}`
+- Input: `{'w': True, 's': True, 'a': False, 'd': True, 'q': False, 'e': False, 'v': False, 'c': False}`
+- After resolution: `{'w': False, 's': False, 'a': False, 'd': True, 'q': False, 'e': False, 'v': False, 'c': False}`
 
 ---
 
-### Helper Function: `_calculate_attitude_command(keys: Dict[str, bool]) -> Tuple[float, float]`
+### Helper Function: `_calculate_manual_attitude_command(keys: Dict[str, bool]) -> Tuple[float, float, float, float]`
 
-**Purpose:** Convert resolved key presses into body attitude targets.
+**Purpose:** Convert resolved key presses into body attitude, yaw delta, and thrust targets.
 
 **Signature:**
 ```python
-def _calculate_attitude_command(keys: Dict[str, bool]) -> Tuple[float, float]
+def _calculate_manual_attitude_command(keys: Dict[str, bool]) -> Tuple[float, float, float, float]
 ```
 
 **Input:** Resolved keys dict (from `_resolve_conflicts()`)
@@ -205,8 +214,10 @@ def _calculate_attitude_command(keys: Dict[str, bool]) -> Tuple[float, float]
 **Output:**
 ```python
 {
-    'roll_deg': float,   # commanded roll target in degrees
-    'pitch_deg': float,  # commanded pitch target in degrees
+    'roll_deg': float,      # commanded roll target in degrees
+    'pitch_deg': float,     # commanded pitch target in degrees
+    'yaw_delta_deg': float, # incremental yaw adjustment in degrees
+    'thrust': float,        # normalized collective thrust [0.0 .. 1.0]
 }
 ```
 
@@ -215,43 +226,38 @@ def _calculate_attitude_command(keys: Dict[str, bool]) -> Tuple[float, float]
 - `pitch_deg = backward_pitch_step` when `keys['s']`
 - `roll_deg = left_roll_step` when `keys['a']`
 - `roll_deg = right_roll_step` when `keys['d']`
-- No horizontal keys pressed leaves the corresponding target at 0
+- `yaw_delta_deg = yaw_left_step` when `keys['q']`
+- `yaw_delta_deg = yaw_right_step` when `keys['e']`
+- `thrust = hover_thrust` when no `v`/`c` input
+- `thrust = climb_thrust` when `keys['v']`
+- `thrust = descend_thrust` when `keys['c']`
+- No horizontal keys pressed leaves the corresponding attitude target at 0
 
 **Examples:**
-- W only: `pitch_deg = forward_pitch_step`, `roll_deg = 0`
-- A only: `pitch_deg = 0`, `roll_deg = left_roll_step`
-- W+D: `pitch_deg = forward_pitch_step`, `roll_deg = right_roll_step`
-- No keys: `pitch_deg = 0`, `roll_deg = 0`
+- W only: `pitch_deg = forward_pitch_step`, `roll_deg = 0`, `yaw_delta_deg = 0`
+- A only: `pitch_deg = 0`, `roll_deg = left_roll_step`, `yaw_delta_deg = 0`
+- Q only: `pitch_deg = 0`, `roll_deg = 0`, `yaw_delta_deg = yaw_left_step`
+- V only: `thrust = climb_thrust`
+- W+D: `pitch_deg = forward_pitch_step`, `roll_deg = right_roll_step`, `yaw_delta_deg = 0`
+- No keys: all targets remain neutral and thrust = hover_thrust
 
 ---
 
-### Helper Function: `_calculate_thrust_command(keys: Dict[str, bool]) -> float`
+### Thrust Computation
 
-**Purpose:** Convert E/C input into a fixed thrust setpoint.
+**Purpose:** Describe how V/C input is converted into the thrust component returned by `_calculate_manual_attitude_command()`.
 
-**Signature:**
-```python
-def _calculate_thrust_command(keys: Dict[str, bool]) -> float
-```
-
-**Input:** Resolved keys dict (from `_resolve_conflicts()`)
-
-**Output:**
-```python
-thrust: float  # normalized collective thrust [0.0 .. 1.0]
-```
-
-**Calculation:**
-- `thrust = hover_thrust` when no E/C keys are pressed
-- `thrust = climb_thrust` when `keys['e']` is True
+**Behavior:**
+- `thrust = hover_thrust` when no V/C keys are pressed
+- `thrust = climb_thrust` when `keys['v']` is True
 - `thrust = descend_thrust` when `keys['c']` is True
-- E/C conflicts cancel and return `hover_thrust`
+- V/C conflicts cancel and return `hover_thrust`
 
 **Examples:**
-- E only: climb thrust above hover
+- V only: climb thrust above hover
 - C only: descend thrust below hover
 - No keys: hover thrust
-- E + C: hover thrust
+- V + C: hover thrust
 
 ---
 
@@ -260,7 +266,7 @@ thrust: float  # normalized collective thrust [0.0 .. 1.0]
 ### Constants
 ```python
 SPEED_LATERAL = 2.0      # nominal input scale for WASD attitude commands
-SPEED_VERTICAL = 2.0     # nominal input scale for E/C thrust command behavior
+SPEED_VERTICAL = 2.0     # nominal input scale for V/C thrust command behavior
 CONTROL_LOOP_HZ = 250    # Hz (called every 4 ms)
 CAMERA_PITCH_OFFSET = 20.0  # degrees; camera is mounted +20° pitch relative to body
 # (Implementation should convert to radians when composing rotations)
@@ -270,7 +276,9 @@ KEY_FORWARD = 'w'
 KEY_LEFT = 'a'
 KEY_BACKWARD = 's'
 KEY_RIGHT = 'd'
-KEY_UP = 'e'
+KEY_YAW_LEFT = 'q'
+KEY_YAW_RIGHT = 'e'
+KEY_UP = 'v'
 KEY_DOWN = 'c'
 ```
 
@@ -305,21 +313,18 @@ Note: the values above represent the vehicle *body* attitude. Compute the *camer
 ```
 handle_user_input(armed_controller)
   ├─ keys = _get_pressed_keys()
-  │   └─ Return dict: {'w': bool, 'a': bool, 's': bool, 'd': bool, 'e': bool, 'c': bool}
+  │   └─ Return dict: {'w': bool, 'a': bool, 's': bool, 'd': bool, 'q': bool, 'e': bool, 'v': bool, 'c': bool}
   │
   ├─ keys = _resolve_conflicts(keys)
-  │   └─ Cancel W/S, A/D, E/C conflicts on the same axis
+  │   └─ Cancel W/S, A/D, Q/E, V/C conflicts on the same axis
   │
-  ├─ attitude_command = _calculate_attitude_command(keys)
+  ├─ attitude_command = _calculate_manual_attitude_command(keys)
   │   └─ pitch_command = fixed step from W/S
   │   └─ roll_command = fixed step from A/D
+  │   └─ yaw_delta = fixed step from Q/E
+  │   └─ thrust = hover/climb/descend from V/C
   │
-  ├─ thrust_command = _calculate_thrust_command(keys)
-  │   └─ hover thrust if no E/C
-  │   └─ climb thrust if E
-  │   └─ descend thrust if C
-  │
-  ├─ yaw_command = body_yaw from armed_controller.data['attitude']
+  ├─ yaw_command = body_yaw + yaw_delta
   │
   └─ controller.update_attitude_flight_control(
         armed_controller.sim_conn,
@@ -340,7 +345,7 @@ handle_user_input(armed_controller)
 | **No keys pressed** | All keys released | Level attitude and hover thrust held; drone hovers | _get_pressed_keys() returns all False |
 | **Conflicting forward/backward** | W and S both pressed | Both cancel; no pitch command change | _resolve_conflicts() sets both False |
 | **Conflicting left/right** | A and D both pressed | Both cancel; no roll command change | _resolve_conflicts() sets both False |
-| **Conflicting altitude** | E and C both pressed | Both cancel; hover thrust remains unchanged | _resolve_conflicts() sets both False |
+| **Conflicting altitude** | V and C both pressed | Both cancel; hover thrust remains unchanged | _resolve_conflicts() sets both False |
 | **Multiple conflicts** | W+S+A+D all pressed | All cancel; hover | All resolve to False in _resolve_conflicts() |
 | **Rapid key toggle** | Key pressed/released faster than control cycle | Detected on next frame (within 4ms) | keyboard.is_pressed() polled every cycle |
 | **Missing attitude (roll/pitch/yaw)** | `shared_data['attitude']` missing or incomplete | Assume roll=0,pitch=0,yaw=0; log warning | Try/except, default to neutral attitude with warning log |
@@ -359,43 +364,43 @@ handle_user_input(armed_controller)
 **Test 1: Conflict Resolution**
 ```
 Test: _resolve_conflicts()
-Input: {'w': True, 's': True, 'a': False, 'd': False, 'e': False, 'c': False}
-Expected: {'w': False, 's': False, 'a': False, 'd': False, 'e': False, 'c': False}
+Input: {'w': True, 's': True, 'a': False, 'd': False, 'q': False, 'e': False, 'v': False, 'c': False}
+Expected: {'w': False, 's': False, 'a': False, 'd': False, 'q': False, 'e': False, 'v': False, 'c': False}
 ```
 
 **Test 2: Attitude Command Generation**
 ```
-Test: _calculate_attitude_command()
-Input: {'w': True, 'a': False, 's': False, 'd': False, 'e': False, 'c': False}
-Expected: pitch_command = forward pitch step, roll_command = 0
+Test: _calculate_manual_attitude_command()
+Input: {'w': True, 'a': False, 's': False, 'd': False, 'q': False, 'e': False, 'v': False, 'c': False}
+Expected: pitch_command = forward pitch step, roll_command = 0, yaw_delta = 0
 ```
 
 **Test 3: Roll Command Generation**
 ```
-Test: _calculate_attitude_command()
-Input: {'w': False, 'a': True, 's': False, 'd': False, 'e': False, 'c': False}
-Expected: roll_command = left roll step, pitch_command = 0
+Test: _calculate_manual_attitude_command()
+Input: {'w': False, 'a': True, 's': False, 'd': False, 'q': False, 'e': False, 'v': False, 'c': False}
+Expected: roll_command = left roll step, pitch_command = 0, yaw_delta = 0
 ```
 
 **Test 4: Thrust Mode Selection**
 ```
-Test: _calculate_thrust_command()
-Input: {'w': False, 'a': False, 's': False, 'd': False, 'e': True, 'c': False}
-Expected: thrust_command = fixed climb thrust above hover
+Test: _calculate_manual_attitude_command()
+Input: {'w': False, 'a': False, 's': False, 'd': False, 'q': False, 'e': False, 'v': True, 'c': False}
+Expected: thrust = fixed climb thrust above hover
 ```
 
 **Test 5: Hover Thrust**
 ```
-Test: _calculate_thrust_command()
-Input: {'e': False, 'c': False}
-Expected: thrust_command = exact hover thrust
+Test: _calculate_manual_attitude_command()
+Input: {'w': False, 'a': False, 's': False, 'd': False, 'q': False, 'e': False, 'v': False, 'c': False}
+Expected: thrust = exact hover thrust
 ```
 
 **Test 6: Combined Attitude**
 ```
-Test: _calculate_attitude_command()
-Input: {'w': True, 'd': True, 's': False, 'a': False, 'e': False, 'c': False}
-Expected: pitch_command = forward pitch step, roll_command = right roll step
+Test: _calculate_manual_attitude_command()
+Input: {'w': True, 'd': True, 's': False, 'a': False, 'q': False, 'e': False, 'v': False, 'c': False}
+Expected: pitch_command = forward pitch step, roll_command = right roll step, yaw_delta = 0
 ```
 
 **Test 7: No Input**
@@ -408,7 +413,7 @@ Expected: controller.update_attitude_flight_control() called with hover thrust a
 **Test 8: Conflict Cancellation on Attitude**
 ```
 Test: _resolve_conflicts()
-Input: {'w': True, 's': True, 'a': True, 'd': True, 'e': True, 'c': True}
+Input: {'w': True, 's': True, 'a': True, 'd': True, 'q': True, 'e': True, 'v': True, 'c': True}
 Expected: all keys cancel, no attitude or thrust change
 ```
 
@@ -443,7 +448,7 @@ Expected: camera_pitch = 20.0 degrees above body pitch
    - Verify: Drone moves East (not North)
 
 5. **Altitude Movement (Camera-Relative)**
-    - Action: Press E
+    - Action: Press V
     - Verify: Drone climbs with the camera pointing direction factored into ascent behavior; with level camera this results in a pure climb, with pitched camera this produces climb plus horizontal components
     - Action: Press C
     - Verify: Drone descends while respecting the camera orientation and thrust setpoint
@@ -469,9 +474,9 @@ Expected: camera_pitch = 20.0 degrees above body pitch
 ## 8. SCOPE & CONSTRAINTS
 
 ### Included
-- Keyboard input (WASD, E, C) with conflict resolution
+- Keyboard input (WASD, Q/E, V/C) with conflict resolution
 - Camera-heading-relative horizontal movement (WASD)
-- Camera-relative vertical movement (E, C)
+- Camera-relative vertical movement (V, C)
 - Attitude setpoint composition with camera pitch offset
 - 250 Hz control loop integration
 - Continuous polling (handles key events at sub-frame granularity)
