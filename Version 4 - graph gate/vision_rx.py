@@ -46,13 +46,20 @@ PNP_MAX_DEPTH_M = 50.0
 ORANGE_HSV_LOWER = np.array([3, 80, 70], dtype=np.uint8)
 ORANGE_HSV_UPPER = np.array([30, 255, 255], dtype=np.uint8)
 
+SHOW_VISION_DEBUG = True
+VISION_DEBUG_WINDOW = "Vision Debug"
+VISION_DEBUG_EVERY_N = 3
+
 class VisionRX:
 
     def __init__(self, data):
+        self._debug_window_ready = False
+        self._debug_frame_counter = 0
+
         self.data = data
         self.last_vision_debug_print_time = 0.0
         self._overlay_window_ready = False
-        self._metric_history = deque(maxlen=METRIC_HISTORY_LEN)
+        self._metric_history = deque(maxlen=METRIC_HISTORY_LEN) # saves a queue of metrics for the gate detection
         self.thread = threading.Thread(
             target=self._vision_loop,
             daemon=True
@@ -63,6 +70,34 @@ class VisionRX:
     def get_thread_for_join(self):
         self.is_running = False
         return self.thread
+    
+    def _show_debug_panel(self, images):
+        if not SHOW_VISION_DEBUG:
+            return
+        
+        self._debug_frame_counter += 1
+        if self._debug_frame_counter & VISION_DEBUG_EVERY_N != 0:
+            return
+        
+        if not self._debug_window_ready:
+            cv2.namedWindow(VISION_DEBUG_WINDOW, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(VISION_DEBUG_WINDOW, 1200, 400)
+            self._debug_window_ready = True
+
+        small_images = []
+        for img in images:
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            if len(img.shape) == 2:
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            else:
+                img_rgb = img
+            small_images.append(cv2.resize(img_rgb, (320, 180)))
+
+        panel = np.concatenate(small_images, axis=1)
+        cv2.imshow(VISION_DEBUG_WINDOW, panel)
+        cv2.waitKey(1)
 
     def _vision_loop(self):
         header_format = "<IHHIIQ"
@@ -129,16 +164,16 @@ class VisionRX:
         # image is your FPV camera frame in JPEG format
         #
         #
-        detection = self.detect_gate(img)
-        detection["frame_id"] = frame_id
-        detection["time"] = time.time()
-        if detection.get("detected"):
-            size_ratio = float(detection.get("size_ratio", 0.0))
-            detection["distance_estimate_m"] = self.estimate_gate_distance_m(size_ratio)
+        detection = self.detect_gate(img) # detecting the gate
+        detection["frame_id"] = frame_id # save the frame_id
+        detection["time"] = time.time() # save a timestamp
+        if detection.get("detected"): # check that detection has detected a gate
+            size_ratio = float(detection.get("size_ratio", 0.0)) # check size ratio
+            detection["distance_estimate_m"] = self.estimate_gate_distance_m(size_ratio) # calculate distance estimate
         else:
             detection["distance_estimate_m"] = None
-        self._record_metric_sample(detection)
-        self.data["gate_detection"] = detection
+        self._record_metric_sample(detection) # record metrics for detection in queue
+        self.data["gate_detection"] = detection # save in shared data the detection
         # self.print_gate_debug(detection)
         if SHOW_FPV_OVERLAY:
             overlay = self.draw_gate_overlay(img, detection)
@@ -381,7 +416,7 @@ class VisionRX:
         return float(reference_distance_m * (reference_size / size_ratio))
 
     def _record_metric_sample(self, detection):
-        if detection.get("detected"):
+        if detection.get("detected"): # if we detected a gate
             pnp_valid = detection.get("pnp_valid")
             self._metric_history.append({
                 "distance_m": detection.get("distance_estimate_m"),
@@ -393,7 +428,7 @@ class VisionRX:
                 "pnp_offset_x": float(detection.get("pnp_offset_x", 0.0)) if pnp_valid else None,
                 "pnp_offset_y": float(detection.get("pnp_offset_y", 0.0)) if pnp_valid else None,
             })
-        else:
+        else: # if not, set default values
             self._metric_history.append({
                 "distance_m": None,
                 "angle_deg": 0.0,
@@ -839,9 +874,16 @@ class VisionRX:
 
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, ORANGE_HSV_LOWER, ORANGE_HSV_UPPER)
+
+             
+
         kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask_morph_open = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask_morph_close = cv2.morphologyEx(mask_morph_open, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        self._show_debug_panel([img, mask, mask_morph_open, mask_morph_close])
+
+        mask = mask_morph_close
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         candidates = []
