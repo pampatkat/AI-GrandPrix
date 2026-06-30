@@ -215,6 +215,7 @@ RESET_DETECT_BACKWARD_MS = 2000
 
 class Controller:
     def __init__(self, sim_conn, data, system_boot_ms):
+        self.manual_movement = True
         self.sim_conn = sim_conn
         self.data = data
         self.system_boot_ms = system_boot_ms
@@ -271,6 +272,8 @@ class Controller:
             # zero-velocity hover setpoint doesn't - the autopilot still holds
             # altitude with hover throttle, which reads as "throttle up").
             update_throttle_down(self.sim_conn, self.system_boot_ms)
+        elif self.manual_movement:
+            navigation.handle_user_input(self)
         else:
             current_z = (self.data.get('local_position') or {}).get('z', self.hold_z)
             # Feed the raw detection (the gate follower does its own confidence /
