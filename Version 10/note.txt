@@ -1,0 +1,23 @@
+- make the drone movement
+- try making the drone moving forward backward
+- Trying making the drone moving in circle
+- what is the detection metrics in the window
+- what is PnP dist
+
+GATE_ROLL_GAIN_DEG = -8.0 # adjust the P and the rate gain adjust the D part
+MAX_GATE_ROLL_DEG = 1.5 # maximum bank angle allowed from roll alignment
+GATE_ORIENTATION_ROLL_GAIN_DEG = 0.4 # banks to match the gate's tilt/rotation in the image not left or right.
+MAX_GATE_ORIENTATION_ROLL_DEG = 1.5 #maximum bank angle allowed from orientation alignment
+GATE_ORIENTATION_YAW_GAIN_DEG = 0.01 # yaw to match the gate's rotation in the image not left or right.
+MAX_GATE_ORIENTATION_YAW_DEG = 0.5 #maximum yaw angle allowed from orientation alignment
+
+P = Proportional
+Example
+Target = 10 m
+Current position = 7 m
+Push with strength 6.
+The farther away you are, the harder it pushes.
+
+D = Derivative (Velocity)
+You're moving too fast. Slow down.
+
