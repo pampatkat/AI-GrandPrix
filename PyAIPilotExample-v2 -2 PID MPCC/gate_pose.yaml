@@ -1,0 +1,13 @@
+# Gate pose dataset. Images and YOLO labels are intentionally co-located in
+# the supplied folders; Ultralytics resolves each image's .txt sibling.
+path: E:/AIGP_3379
+train: TrainingImages
+val: ValidationImages/ValidationImages
+
+names:
+  0: gate
+
+# TL, TR, BL, BR, TL_outer, TR_outer, BL_outer, BR_outer.
+# Each keypoint contains normalized x, y and visibility values.
+kpt_shape: [8, 3]
+flip_idx: [1, 0, 3, 2, 5, 4, 7, 6]
