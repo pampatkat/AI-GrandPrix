@@ -10,7 +10,7 @@
 
 </div>
 
-This repository is the home for the code written by Oregon State University engineering students [Pam](https://github.com/pampatkat), [Allie](https://github.com/quetzlcoatlus) and [Chris](https://github.com/chrisbuild124) for the Anduril AI Grand Prix 2026. It is largely exploratory as we didn't pass the first qualifier. However, it was an enjoyable learning experience working together and trying autonomous drone software development. We learned some facets of machine learning, computer vision, networking, drone physics and parallel programming.
+This repository is the home for the code written by Oregon State University engineering students [Pam](https://github.com/pampatkat), [Allie](https://github.com/quetzlcoatlus) and [Chris](https://github.com/chrisbuild124) for the Anduril AI Grand Prix 2026. It is largely exploratory, it was an enjoyable learning experience working together and trying autonomous drone software development. We learned some facets of machine learning, computer vision, networking, drone physics and parallel programming.
 
 ## 🛠 Problem Statement
 
