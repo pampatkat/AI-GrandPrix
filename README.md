@@ -31,7 +31,7 @@ Program a drone to fly through a set of gates while managing noise and obstacle 
 
 ### 🌱 What was left to do
 
-We figured out how to do relatively accurate object detection for the gates, but we weren't able to finish the qualifier in time because we didn't have an accurate path finding strategy given the positions of the objects.
+We figured out how to do relatively accurate object detection for the gates, we didn't have an accurate path finding strategy given the positions of the objects.
 
 ## 🤝 How we coordinated
 
